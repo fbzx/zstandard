@@ -1612,6 +1612,17 @@ impl<'a> StreamingDecoder<'a> {
             self.release_history(droppable);
             return;
         }
+        // Between frames nothing behind the read cursor is history, so the
+        // half-buffer rule below would only be moving bytes the caller is
+        // about to take anyway: a reader draining a finished frame in fixed
+        // pieces paid a memmove of the remainder each time it crossed the
+        // halfway mark, about one copy of the whole output per frame. Wait
+        // for the buffer to empty instead, which is the branch above. The
+        // next frame's `frame_start` accounts for whatever is still here,
+        // and once it opens the window rule applies again.
+        if self.current_frame.is_none() {
+            return;
+        }
         if droppable * 2 >= self.output.len() {
             self.output.drain(..droppable);
             self.output_pos -= droppable;
