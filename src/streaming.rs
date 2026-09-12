@@ -1154,6 +1154,30 @@ impl<'a> StreamingDecoder<'a> {
         self.output.len().saturating_sub(self.output_pos)
     }
 
+    /// Borrow the decoded bytes buffered so far without removing them.
+    ///
+    /// Pair with [`consume_output`](Self::consume_output) to append output to
+    /// something that takes a slice, with no intermediate copy through a
+    /// caller's buffer. This is what `io::Reader::read_to_end` uses.
+    pub(crate) fn pending_output(&self) -> &[u8] {
+        &self.output[self.output_pos..]
+    }
+
+    /// Discard the first `count` bytes of [`pending_output`](Self::pending_output).
+    ///
+    /// # Panics
+    ///
+    /// If `count` exceeds [`pending_output_len`](Self::pending_output_len).
+    pub(crate) fn consume_output(&mut self, count: usize) {
+        assert!(
+            count <= self.pending_output_len(),
+            "consumed {count} bytes of pending output but only {} are pending",
+            self.pending_output_len()
+        );
+        self.output_pos += count;
+        self.compact_output();
+    }
+
     /// Compressed bytes that have been pushed but not yet consumed.
     ///
     /// **Only meaningful with

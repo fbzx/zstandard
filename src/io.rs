@@ -353,6 +353,41 @@ impl<R: Read> Read for Reader<'_, R> {
             }
         }
     }
+
+    /// Appends the decoder's output to `buf` straight from its buffer.
+    ///
+    /// The default goes through [`read`](Self::read) into `buf`'s spare
+    /// capacity, which it zeroes before every call and grows a step at a
+    /// time; each step also had the decoder shifting what was left down its
+    /// own buffer. Whole frames usually decode in one refill, so this is one
+    /// `extend_from_slice` per frame instead. `io::copy` into a `Vec` lands
+    /// here.
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        let start = buf.len();
+        loop {
+            let pending = self.decoder.pending_output_len();
+            if pending != 0 {
+                buf.extend_from_slice(self.decoder.pending_output());
+                self.decoder.consume_output(pending);
+                continue;
+            }
+            if self.finished {
+                return Ok(buf.len() - start);
+            }
+            if self.input_done {
+                self.decoder.finish()?;
+                self.finished = true;
+                continue;
+            }
+
+            match self.refill() {
+                Ok(0) => self.input_done = true,
+                Ok(_) => {}
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(err) => return Err(err),
+            }
+        }
+    }
 }
 
 impl<R: Read> Reader<'_, R> {
