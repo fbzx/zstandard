@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- One-shot compression with the fast and double-fast strategies no longer loses matches after the first 16 MiB of input. Their tagged tables now retain full source positions when the input needs them, while smaller inputs keep the existing packed tables and byte-identical output.
+
 ## [0.1.4] - 2026-08-31
 
 ### Changed

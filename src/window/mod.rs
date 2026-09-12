@@ -49,16 +49,19 @@ pub(crate) struct ContiguousBlockMatchState {
     /// the parser a segment that begins after a match it never saw. Every
     /// other strategy keeps its own cursor on its own finder.
     fast_table_next_to_update: usize,
-    /// The parameters this state was built from, and the whole of what
-    /// [`Self::reset_if_compatible`] will reuse it for.
+    /// The parameters this state was built from.
     built_with: MatchFinderParameters,
+    /// Whether a tagged table was built wide enough for positions past 16 MiB.
+    wide_entries: bool,
 }
 
 #[derive(Debug, Clone)]
 enum ContiguousBlockMatchStateInner {
     Chain(MatchFinder),
     Fast(FastFinder),
+    WideFast(WideFastFinder),
     DoubleFast(DoubleFastFinder),
+    WideDoubleFast(WideDoubleFastFinder),
     Row(RowHashFinder),
     BinaryTree(BinaryTreeFinder),
 }
@@ -100,10 +103,22 @@ enum PrefixedBlockMatchStateInner {
         mode: PrefixMatchMode,
         prepared: Option<Arc<PreparedFastDictionaryTables>>,
     },
+    WideFast {
+        prefix_finder: Option<Arc<WideFastFinder>>,
+        src_finder: WideFastFinder,
+        mode: PrefixMatchMode,
+        prepared: Option<Arc<PreparedFastDictionaryTables>>,
+    },
     DoubleFast {
         /// `None` under [`PrefixMatchMode::DictMatchState`], as for `Fast`.
         prefix_finder: Option<Arc<DoubleFastFinder>>,
         src_finder: DoubleFastFinder,
+        mode: PrefixMatchMode,
+        prepared: Option<Arc<PreparedDoubleFastDictionaryTables>>,
+    },
+    WideDoubleFast {
+        prefix_finder: Option<Arc<WideDoubleFastFinder>>,
+        src_finder: WideDoubleFastFinder,
         mode: PrefixMatchMode,
         prepared: Option<Arc<PreparedDoubleFastDictionaryTables>>,
     },
@@ -119,13 +134,75 @@ enum PrefixedBlockMatchStateInner {
     },
 }
 
+fn new_prefixed_fast_finders<E: TaggedEntry>(
+    prefix: &[u8],
+    params: MatchFinderParameters,
+    mode: PrefixMatchMode,
+) -> (Option<Arc<FastFinderImpl<E>>>, FastFinderImpl<E>) {
+    let prefix_finder = (mode == PrefixMatchMode::ExtDict).then(|| {
+        let mut finder = FastFinderImpl::new(params.dictionary_hash_bits(), params.min_match);
+        // C's byCopyingCDict populates this from a CDict built with
+        // `ZSTD_fillHashTableForCDict`: stride 3 with empty-slot extras.
+        finder.insert_prefix_for_cdict(prefix);
+        Arc::new(finder)
+    });
+    let src_finder = FastFinderImpl::new(params.hash_bits, params.min_match);
+    (prefix_finder, src_finder)
+}
+
+fn new_prefixed_double_fast_finders<E: TaggedEntry>(
+    prefix: &[u8],
+    params: MatchFinderParameters,
+    mode: PrefixMatchMode,
+) -> (
+    Option<Arc<DoubleFastFinderImpl<E>>>,
+    DoubleFastFinderImpl<E>,
+) {
+    let prefix_finder = (mode == PrefixMatchMode::ExtDict).then(|| {
+        let mut finder = DoubleFastFinderImpl::new(
+            params.dictionary_hash_bits(),
+            params.dictionary_chain_log(),
+            params.min_match,
+        );
+        finder.insert_prefix_ext_dict(prefix);
+        Arc::new(finder)
+    });
+    let src_finder = DoubleFastFinderImpl::new(
+        params.hash_bits,
+        params.secondary_hash_bits,
+        params.min_match,
+    );
+    (prefix_finder, src_finder)
+}
+
 impl ContiguousBlockMatchState {
     pub(crate) fn new(src_len: usize, params: MatchFinderParameters) -> Self {
+        Self::new_with_position_limit(src_len, src_len, params)
+    }
+
+    pub(crate) fn new_with_position_limit(
+        src_len: usize,
+        position_limit: usize,
+        params: MatchFinderParameters,
+    ) -> Self {
         let inner = match params.parser_strategy {
+            ParserStrategy::Fast if position_limit > PACKED_TAGGED_POSITION_LIMIT => {
+                ContiguousBlockMatchStateInner::WideFast(WideFastFinder::new(
+                    params.hash_bits,
+                    params.min_match,
+                ))
+            }
             ParserStrategy::Fast => ContiguousBlockMatchStateInner::Fast(FastFinder::new(
                 params.hash_bits,
                 params.min_match,
             )),
+            ParserStrategy::DoubleFast if position_limit > PACKED_TAGGED_POSITION_LIMIT => {
+                ContiguousBlockMatchStateInner::WideDoubleFast(WideDoubleFastFinder::new(
+                    params.hash_bits,
+                    params.secondary_hash_bits,
+                    params.min_match,
+                ))
+            }
             ParserStrategy::DoubleFast => {
                 ContiguousBlockMatchStateInner::DoubleFast(DoubleFastFinder::new(
                     params.hash_bits,
@@ -155,6 +232,7 @@ impl ContiguousBlockMatchState {
             inner,
             fast_table_next_to_update: 0,
             built_with: params,
+            wide_entries: position_limit > PACKED_TAGGED_POSITION_LIMIT,
         }
     }
 
@@ -163,7 +241,9 @@ impl ContiguousBlockMatchState {
     pub(crate) fn reset(&mut self) {
         match &mut self.inner {
             ContiguousBlockMatchStateInner::Fast(finder) => finder.reset(),
+            ContiguousBlockMatchStateInner::WideFast(finder) => finder.reset(),
             ContiguousBlockMatchStateInner::DoubleFast(finder) => finder.reset(),
+            ContiguousBlockMatchStateInner::WideDoubleFast(finder) => finder.reset(),
             ContiguousBlockMatchStateInner::Row(finder) => finder.reset(),
             ContiguousBlockMatchStateInner::Chain(finder) => finder.reset(),
             ContiguousBlockMatchStateInner::BinaryTree(finder) => finder.reset(),
@@ -186,8 +266,14 @@ impl ContiguousBlockMatchState {
     /// state built at one `min_match` and parsed the next frame at another;
     /// the finders keep their own clamped copies of `min_match`, `chain_log`
     /// and `search_log`, and no `reset` restores them.
-    pub(crate) fn reset_if_compatible(&mut self, params: MatchFinderParameters) -> bool {
-        if self.built_with != params {
+    pub(crate) fn reset_if_compatible(
+        &mut self,
+        params: MatchFinderParameters,
+        position_limit: usize,
+    ) -> bool {
+        if self.built_with != params
+            || self.wide_entries != (position_limit > PACKED_TAGGED_POSITION_LIMIT)
+        {
             return false;
         }
         self.reset();
@@ -207,7 +293,9 @@ impl ContiguousBlockMatchState {
     pub(crate) fn rebase_period(&self) -> usize {
         match &self.inner {
             ContiguousBlockMatchStateInner::Fast(_)
+            | ContiguousBlockMatchStateInner::WideFast(_)
             | ContiguousBlockMatchStateInner::DoubleFast(_)
+            | ContiguousBlockMatchStateInner::WideDoubleFast(_)
             | ContiguousBlockMatchStateInner::Row(_) => 1,
             ContiguousBlockMatchStateInner::Chain(finder) => finder.rebase_period(),
             ContiguousBlockMatchStateInner::BinaryTree(finder) => finder.rebase_period(),
@@ -239,7 +327,9 @@ impl ContiguousBlockMatchState {
         match &mut self.inner {
             // No cycle-indexed table, so both routes are the same one.
             ContiguousBlockMatchStateInner::Fast(finder) => finder.shift_positions(delta),
+            ContiguousBlockMatchStateInner::WideFast(finder) => finder.shift_positions(delta),
             ContiguousBlockMatchStateInner::DoubleFast(finder) => finder.shift_positions(delta),
+            ContiguousBlockMatchStateInner::WideDoubleFast(finder) => finder.shift_positions(delta),
             ContiguousBlockMatchStateInner::Row(finder) => finder.shift_positions(delta),
             ContiguousBlockMatchStateInner::Chain(finder) if by_slot => {
                 finder.shift_positions_by_slot(delta, live_end);
@@ -257,7 +347,13 @@ impl ContiguousBlockMatchState {
         match &mut self.inner {
             ContiguousBlockMatchStateInner::Chain(finder) => finder.insert_range(src, start, end),
             ContiguousBlockMatchStateInner::Fast(finder) => finder.insert_range(src, start, end),
+            ContiguousBlockMatchStateInner::WideFast(finder) => {
+                finder.insert_range(src, start, end)
+            }
             ContiguousBlockMatchStateInner::DoubleFast(finder) => {
+                finder.insert_range(src, start, end)
+            }
+            ContiguousBlockMatchStateInner::WideDoubleFast(finder) => {
                 finder.insert_range(src, start, end)
             }
             ContiguousBlockMatchStateInner::Row(finder) => finder.insert_range(src, start, end),
@@ -291,7 +387,9 @@ impl ContiguousBlockMatchState {
                 finder.next_to_update.min(block_start)
             }
             ContiguousBlockMatchStateInner::Fast(_)
-            | ContiguousBlockMatchStateInner::DoubleFast(_) => block_start,
+            | ContiguousBlockMatchStateInner::WideFast(_)
+            | ContiguousBlockMatchStateInner::DoubleFast(_)
+            | ContiguousBlockMatchStateInner::WideDoubleFast(_) => block_start,
         }
     }
 
@@ -370,7 +468,9 @@ impl ContiguousBlockMatchState {
                     limited_update_after_long_match(finder.next_to_update, block_start);
             }
             ContiguousBlockMatchStateInner::Fast(_)
-            | ContiguousBlockMatchStateInner::DoubleFast(_) => {}
+            | ContiguousBlockMatchStateInner::WideFast(_)
+            | ContiguousBlockMatchStateInner::DoubleFast(_)
+            | ContiguousBlockMatchStateInner::WideDoubleFast(_) => {}
         }
     }
 
@@ -405,7 +505,9 @@ impl ContiguousBlockMatchState {
             // Neither files positions through a cursor while parsing; the
             // clamp above moved the one the fill below reads.
             ContiguousBlockMatchStateInner::Fast(_)
-            | ContiguousBlockMatchStateInner::DoubleFast(_) => {}
+            | ContiguousBlockMatchStateInner::WideFast(_)
+            | ContiguousBlockMatchStateInner::DoubleFast(_)
+            | ContiguousBlockMatchStateInner::WideDoubleFast(_) => {}
         }
     }
 
@@ -427,7 +529,10 @@ impl ContiguousBlockMatchState {
     fn fill_fast_tables(&mut self, src: &[u8], end: usize) {
         if !matches!(
             &self.inner,
-            ContiguousBlockMatchStateInner::Fast(_) | ContiguousBlockMatchStateInner::DoubleFast(_)
+            ContiguousBlockMatchStateInner::Fast(_)
+                | ContiguousBlockMatchStateInner::WideFast(_)
+                | ContiguousBlockMatchStateInner::DoubleFast(_)
+                | ContiguousBlockMatchStateInner::WideDoubleFast(_)
         ) {
             return;
         }
@@ -436,17 +541,23 @@ impl ContiguousBlockMatchState {
             return;
         };
         let mut pos = self.fast_table_next_to_update;
-        while pos < limit {
-            match &mut self.inner {
-                ContiguousBlockMatchStateInner::Fast(finder) => {
-                    finder.insert_src_position(src, pos);
+        // One dispatch for the whole run, not one per position: with four
+        // arms the compiler no longer lifts the match out of the loop, and
+        // this loop is most of what a long match costs at level 1.
+        macro_rules! fill {
+            ($finder:expr) => {
+                while pos < limit {
+                    $finder.insert_src_position(src, pos);
+                    pos += FAST_FILL_STEP;
                 }
-                ContiguousBlockMatchStateInner::DoubleFast(finder) => {
-                    finder.insert_src_position(src, pos);
-                }
-                _ => unreachable!("the strategy was checked above"),
-            }
-            pos += FAST_FILL_STEP;
+            };
+        }
+        match &mut self.inner {
+            ContiguousBlockMatchStateInner::Fast(finder) => fill!(finder),
+            ContiguousBlockMatchStateInner::WideFast(finder) => fill!(finder),
+            ContiguousBlockMatchStateInner::DoubleFast(finder) => fill!(finder),
+            ContiguousBlockMatchStateInner::WideDoubleFast(finder) => fill!(finder),
+            _ => unreachable!("the strategy was checked above"),
         }
     }
 }
@@ -469,6 +580,24 @@ impl PrefixedBlockMatchState {
     pub(crate) fn new_with_prepared_match_state(
         prefix: &[u8],
         src_len: usize,
+        params: MatchFinderParameters,
+        mode: PrefixMatchMode,
+        prepared_match_state: Option<&PreparedDictionaryMatchState>,
+    ) -> Self {
+        Self::new_with_prepared_match_state_and_position_limit(
+            prefix,
+            src_len,
+            src_len,
+            params,
+            mode,
+            prepared_match_state,
+        )
+    }
+
+    pub(crate) fn new_with_prepared_match_state_and_position_limit(
+        prefix: &[u8],
+        src_len: usize,
+        position_limit: usize,
         params: MatchFinderParameters,
         mode: PrefixMatchMode,
         prepared_match_state: Option<&PreparedDictionaryMatchState>,
@@ -559,20 +688,27 @@ impl PrefixedBlockMatchState {
                 // once per frame and threw the result away, which is most of
                 // what a prepared dictionary is supposed to save at these two
                 // strategies.
-                let prefix_finder = (mode == PrefixMatchMode::ExtDict).then(|| {
-                    let mut prefix_finder =
-                        FastFinder::new(params.dictionary_hash_bits(), params.min_match);
-                    // C's byCopyingCDict populates the cctx's hash table from
-                    // a CDict built with `ZSTD_fillHashTableForCDict` — stride 3
-                    // with empty-slot extras — not a dense fill.
-                    prefix_finder.insert_prefix_for_cdict(prefix);
-                    Arc::new(prefix_finder)
-                });
-                PrefixedBlockMatchStateInner::Fast {
-                    prefix_finder,
-                    src_finder: FastFinder::new(params.hash_bits, params.min_match),
-                    mode,
-                    prepared,
+                // Ext-dict parsing temporarily lifts both tables into the
+                // prefix-plus-source coordinate space, so that sum is the
+                // widest position either entry representation may carry.
+                if prefix.len().saturating_add(position_limit) > PACKED_TAGGED_POSITION_LIMIT {
+                    let (prefix_finder, src_finder) =
+                        new_prefixed_fast_finders::<u64>(prefix, params, mode);
+                    PrefixedBlockMatchStateInner::WideFast {
+                        prefix_finder,
+                        src_finder,
+                        mode,
+                        prepared,
+                    }
+                } else {
+                    let (prefix_finder, src_finder) =
+                        new_prefixed_fast_finders::<u32>(prefix, params, mode);
+                    PrefixedBlockMatchStateInner::Fast {
+                        prefix_finder,
+                        src_finder,
+                        mode,
+                        prepared,
+                    }
                 }
             }
             ParserStrategy::DoubleFast => {
@@ -593,24 +729,24 @@ impl PrefixedBlockMatchState {
                 // Built only for the mode that reads it, as for `Fast` above.
                 // The `insert_prefix` this used to run under `DictMatchState`
                 // was the dead half.
-                let prefix_finder = (mode == PrefixMatchMode::ExtDict).then(|| {
-                    let mut prefix_finder = DoubleFastFinder::new(
-                        params.dictionary_hash_bits(),
-                        params.dictionary_chain_log(),
-                        params.min_match,
-                    );
-                    prefix_finder.insert_prefix_ext_dict(prefix);
-                    Arc::new(prefix_finder)
-                });
-                PrefixedBlockMatchStateInner::DoubleFast {
-                    prefix_finder,
-                    src_finder: DoubleFastFinder::new(
-                        params.hash_bits,
-                        params.secondary_hash_bits,
-                        params.min_match,
-                    ),
-                    mode,
-                    prepared,
+                if prefix.len().saturating_add(position_limit) > PACKED_TAGGED_POSITION_LIMIT {
+                    let (prefix_finder, src_finder) =
+                        new_prefixed_double_fast_finders::<u64>(prefix, params, mode);
+                    PrefixedBlockMatchStateInner::WideDoubleFast {
+                        prefix_finder,
+                        src_finder,
+                        mode,
+                        prepared,
+                    }
+                } else {
+                    let (prefix_finder, src_finder) =
+                        new_prefixed_double_fast_finders::<u32>(prefix, params, mode);
+                    PrefixedBlockMatchStateInner::DoubleFast {
+                        prefix_finder,
+                        src_finder,
+                        mode,
+                        prepared,
+                    }
                 }
             }
             strategy if strategy.is_binary_tree() => {
@@ -683,7 +819,13 @@ impl PrefixedBlockMatchState {
             PrefixedBlockMatchStateInner::Fast { src_finder, .. } => {
                 src_finder.insert_range(src, start, end)
             }
+            PrefixedBlockMatchStateInner::WideFast { src_finder, .. } => {
+                src_finder.insert_range(src, start, end)
+            }
             PrefixedBlockMatchStateInner::DoubleFast { src_finder, .. } => {
+                src_finder.insert_range(src, start, end)
+            }
+            PrefixedBlockMatchStateInner::WideDoubleFast { src_finder, .. } => {
                 src_finder.insert_range(src, start, end)
             }
             PrefixedBlockMatchStateInner::Row { src_finder, .. } => {
@@ -774,7 +916,9 @@ impl PrefixedBlockMatchState {
             // Neither files positions through a cursor while parsing; the clamp
             // above moved the one the fill below reads.
             PrefixedBlockMatchStateInner::Fast { .. }
-            | PrefixedBlockMatchStateInner::DoubleFast { .. } => {}
+            | PrefixedBlockMatchStateInner::WideFast { .. }
+            | PrefixedBlockMatchStateInner::DoubleFast { .. }
+            | PrefixedBlockMatchStateInner::WideDoubleFast { .. } => {}
         }
     }
 
@@ -785,7 +929,9 @@ impl PrefixedBlockMatchState {
         if !matches!(
             &self.inner,
             PrefixedBlockMatchStateInner::Fast { .. }
+                | PrefixedBlockMatchStateInner::WideFast { .. }
                 | PrefixedBlockMatchStateInner::DoubleFast { .. }
+                | PrefixedBlockMatchStateInner::WideDoubleFast { .. }
         ) {
             return;
         }
@@ -793,17 +939,23 @@ impl PrefixedBlockMatchState {
             return;
         };
         let mut pos = self.fast_table_next_to_update;
-        while pos < limit {
-            match &mut self.inner {
-                PrefixedBlockMatchStateInner::Fast { src_finder, .. } => {
-                    src_finder.insert_src_position(src, pos);
+        // One dispatch for the whole run, not one per position: with four
+        // arms the compiler no longer lifts the match out of the loop, and
+        // this loop is most of what a long match costs at level 1.
+        macro_rules! fill {
+            ($finder:expr) => {
+                while pos < limit {
+                    $finder.insert_src_position(src, pos);
+                    pos += FAST_FILL_STEP;
                 }
-                PrefixedBlockMatchStateInner::DoubleFast { src_finder, .. } => {
-                    src_finder.insert_src_position(src, pos);
-                }
-                _ => unreachable!("the strategy was checked above"),
-            }
-            pos += FAST_FILL_STEP;
+            };
+        }
+        match &mut self.inner {
+            PrefixedBlockMatchStateInner::Fast { src_finder, .. } => fill!(src_finder),
+            PrefixedBlockMatchStateInner::WideFast { src_finder, .. } => fill!(src_finder),
+            PrefixedBlockMatchStateInner::DoubleFast { src_finder, .. } => fill!(src_finder),
+            PrefixedBlockMatchStateInner::WideDoubleFast { src_finder, .. } => fill!(src_finder),
+            _ => unreachable!("the strategy was checked above"),
         }
     }
 
@@ -832,7 +984,9 @@ impl PrefixedBlockMatchState {
     fn insert_block_tail(&mut self, src: &[u8], block_start: usize, block_end: usize) {
         match &mut self.inner {
             PrefixedBlockMatchStateInner::Fast { .. }
-            | PrefixedBlockMatchStateInner::DoubleFast { .. } => {}
+            | PrefixedBlockMatchStateInner::WideFast { .. }
+            | PrefixedBlockMatchStateInner::DoubleFast { .. }
+            | PrefixedBlockMatchStateInner::WideDoubleFast { .. } => {}
             _ => self.insert_range(src, block_start, block_end),
         }
     }
@@ -1200,7 +1354,31 @@ fn plan_sequences_for_contiguous_segment_into(
                 finder,
             )
         }
+        ContiguousBlockMatchStateInner::WideFast(finder) => {
+            plan_sequences_fast_without_prefix_from_into(
+                plan,
+                src,
+                block_start,
+                repeat_offsets,
+                params,
+                window_low,
+                rep_window_low,
+                finder,
+            )
+        }
         ContiguousBlockMatchStateInner::DoubleFast(finder) => {
+            plan_sequences_double_fast_without_prefix_from_into(
+                plan,
+                src,
+                block_start,
+                repeat_offsets,
+                params,
+                window_low,
+                rep_window_low,
+                finder,
+            )
+        }
+        ContiguousBlockMatchStateInner::WideDoubleFast(finder) => {
             plan_sequences_double_fast_without_prefix_from_into(
                 plan,
                 src,
@@ -1946,7 +2124,60 @@ fn plan_sequences_for_prefixed_contiguous_segment_into(
                 )
             }
         }
+        PrefixedBlockMatchStateInner::WideFast {
+            prefix_finder,
+            src_finder,
+            mode,
+            prepared,
+        } => {
+            if prefix_retired {
+                plan_sequences_fast_without_prefix_from_into(
+                    plan,
+                    src,
+                    block_start,
+                    repeat_offsets,
+                    params,
+                    source_low,
+                    rep_window_low,
+                    src_finder,
+                )
+            } else {
+                plan_sequences_fast_with_prefix_from_into(
+                    plan,
+                    src,
+                    block_start,
+                    prefix,
+                    repeat_offsets,
+                    params,
+                    prefix_low,
+                    source_low,
+                    prefix_finder.as_deref(),
+                    src_finder,
+                    *mode,
+                    prepared.as_deref(),
+                )
+            }
+        }
         PrefixedBlockMatchStateInner::DoubleFast {
+            prefix_finder,
+            src_finder,
+            mode,
+            prepared,
+        } => plan_sequences_double_fast_with_prefix_from_into(
+            plan,
+            src,
+            block_start,
+            prefix,
+            repeat_offsets,
+            params,
+            prefix_low,
+            source_low,
+            prefix_finder.as_deref(),
+            src_finder,
+            *mode,
+            prepared.as_deref(),
+        ),
+        PrefixedBlockMatchStateInner::WideDoubleFast {
             prefix_finder,
             src_finder,
             mode,
