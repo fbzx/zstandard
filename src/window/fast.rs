@@ -2,7 +2,7 @@ use super::*;
 
 #[derive(Debug, Clone)]
 pub(crate) struct FastFinder {
-    pub(crate) heads: Vec<u32>,
+    pub(crate) heads: Vec<u64>,
     pub(crate) hash_bits: u32,
     pub(crate) min_match: u32,
 }
@@ -11,7 +11,7 @@ impl FastFinder {
     pub(crate) fn new(hash_bits: u32, min_match: u32) -> Self {
         let hash_bits = tagged_match_hash_bits(hash_bits);
         Self {
-            heads: vec![NO_POS; 1usize << hash_bits],
+            heads: vec![NO_TAGGED_ENTRY; 1usize << hash_bits],
             hash_bits,
             min_match: min_match.clamp(4, 7),
         }
@@ -26,7 +26,7 @@ impl FastFinder {
     /// `self.heads.len()`.
     #[allow(unsafe_code)]
     #[inline(always)]
-    pub(crate) unsafe fn get_head(&self, hash: usize) -> u32 {
+    pub(crate) unsafe fn get_head(&self, hash: usize) -> u64 {
         debug_assert!(hash < self.heads.len());
         // SAFETY: `hash` is in bounds by contract.
         unsafe { *self.heads.get_unchecked(hash) }
@@ -39,10 +39,10 @@ impl FastFinder {
     /// Same requirement as [`Self::get_head`].
     #[allow(unsafe_code)]
     #[inline(always)]
-    pub(crate) unsafe fn set_head(&mut self, hash: usize, pos: u32) {
+    pub(crate) unsafe fn set_head(&mut self, hash: usize, entry: u64) {
         debug_assert!(hash < self.heads.len());
         // SAFETY: `hash` is in bounds by contract.
-        unsafe { *self.heads.get_unchecked_mut(hash) = pos };
+        unsafe { *self.heads.get_unchecked_mut(hash) = entry };
     }
 
     #[inline(always)]
@@ -87,7 +87,7 @@ impl FastFinder {
                 let eht =
                     hash_short_cache_prefix_at_mls(prefix, epos, self.hash_bits, self.min_match);
                 let slot = tagged_index(eht);
-                if self.heads[slot] == NO_POS {
+                if self.heads[slot] == NO_TAGGED_ENTRY {
                     self.heads[slot] = tagged_entry(epos, eht);
                 }
             }
@@ -97,7 +97,7 @@ impl FastFinder {
 
     /// Reset the hash table for a new frame without re-allocating.
     pub(crate) fn reset(&mut self) {
-        self.heads.fill(NO_POS);
+        self.heads.fill(NO_TAGGED_ENTRY);
     }
 
     /// Rebase every filed position by `delta`. See [`shift_tagged_positions`].
@@ -1861,7 +1861,7 @@ fn plan_sequences_fast_with_prepared_dict_inner<const MLS: u32>(
             }
 
             let src_candidate_pos = tagged_pos(src_candidate);
-            let source_valid = src_candidate != NO_POS
+            let source_valid = src_candidate != NO_TAGGED_ENTRY
                 && src_candidate_pos >= source_low
                 && src_candidate_pos < ip0;
             let dict_valid =
@@ -2143,7 +2143,7 @@ pub(crate) fn fast_source_match_without_prefix(
     let idx = tagged_index(ht);
     let entry = finder.heads[idx];
     finder.heads[idx] = tagged_entry(pos, ht);
-    if entry == NO_POS {
+    if entry == NO_TAGGED_ENTRY {
         return None;
     }
     let candidate = tagged_pos(entry);
@@ -2190,7 +2190,7 @@ pub(crate) fn fast_best_match_with_prefix(
     let prefix_entry = prefix_finder.heads[idx];
     src_finder.heads[idx] = tagged_entry(pos, ht);
 
-    let src_match = if src_entry != NO_POS {
+    let src_match = if src_entry != NO_TAGGED_ENTRY {
         let src_cand = tagged_pos(src_entry);
         if src_cand >= source_low && src_cand < pos {
             #[allow(unsafe_code)]
@@ -2205,12 +2205,12 @@ pub(crate) fn fast_best_match_with_prefix(
     } else {
         None
     };
-    let pc = if prefix_entry != NO_POS {
+    let pc = if prefix_entry != NO_TAGGED_ENTRY {
         tagged_pos(prefix_entry)
     } else {
         usize::MAX
     };
-    let prefix_match = (prefix_entry != NO_POS
+    let prefix_match = (prefix_entry != NO_TAGGED_ENTRY
         && pc >= prefix_low
         && pos + required_length <= src.len()
         && pc + required_length <= prefix.len()

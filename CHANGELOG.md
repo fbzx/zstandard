@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- One-shot compression at levels 1 to 4 lost matches beyond 16 MiB: the fast and double-fast finders packed each table position into 24 bits beside an 8-bit tag, so every position past 16,777,216 was truncated on the way in. The long table of the double-fast finder already held 64-bit entries for that reason; the short table and the fast finder's table now do too, and no position truncates. Frames were always valid; below 16 MiB output is byte-identical. On the new 17 MiB interop input, level 1 shrinks from 2,711,777 to 2,331,653 bytes against upstream's 2,351,327, and level 3 from 2,343,417 to upstream's 2,347,233 exactly.
+
 ## [0.1.4] - 2026-08-31
 
 ### Changed

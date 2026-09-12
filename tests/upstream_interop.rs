@@ -3227,6 +3227,53 @@ fn streaming_block_layout_matches_upstream_streaming() {
     }
 }
 
+/// One-shot positions keep growing beyond 16 MiB, where a 24-bit entry wraps.
+#[test]
+fn fast_one_shot_stays_at_upstream_size_past_16_mib() {
+    let Some(helper) = upstream_trace_helper::helper_path() else {
+        return;
+    };
+
+    let mut input = benchmark_corpora::build_json_records_pattern(8 * 1024 * 1024);
+    input.extend(benchmark_corpora::build_tabular_csv_pattern(
+        9 * 1024 * 1024,
+    ));
+    let mut sizes = Vec::new();
+    for level in [1, 3] {
+        let ours = encode_all_with_options(
+            &input,
+            EncoderOptions {
+                compression_level: CompressionLevel::try_new(level).unwrap(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let theirs = upstream_trace_helper::compress_advanced(
+            helper,
+            upstream_trace_helper::DICT_NONE,
+            &upstream_settings_for(level, &[]),
+            &input,
+        );
+        assert_eq!(decode_all(&ours).unwrap(), input);
+        assert_eq!(
+            upstream_trace_helper::decompress_once(helper, "decompress", &ours),
+            input
+        );
+        eprintln!(
+            "17 MiB level {level}: Rust {} bytes, upstream {} bytes",
+            ours.len(),
+            theirs.len()
+        );
+        sizes.push((level, ours.len(), theirs.len()));
+    }
+    for (level, ours, theirs) in sizes {
+        assert!(
+            ours <= theirs,
+            "level {level}: Rust {ours} bytes, upstream {theirs} bytes"
+        );
+    }
+}
+
 /// Streaming a frame long enough to compact its buffer several times must stay
 /// at upstream's size, which is the case a shorter frame cannot cover: below
 /// twice the window the encoder never compacts at all and this whole path is

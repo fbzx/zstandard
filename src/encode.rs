@@ -1797,10 +1797,10 @@ mod tests {
         parse_sequence_section,
     };
     use crate::window::{
-        DoubleFastFinder, DoubleFastMatch, MIN_MATCH, NO_POS, PreparedDictionaryMatchState,
-        ROW_LAZY_TRACE_MAX_STEPS, SequenceTraceChainSearch, SequenceTraceEmission,
-        SequenceTraceEmissionKind, SequenceTraceMatchSource, SequenceTraceRowLazyProbe,
-        SequenceTraceRowLazyStopReason, SequenceTraceRowSearch,
+        DoubleFastFinder, DoubleFastMatch, MIN_MATCH, NO_POS, NO_TAGGED_ENTRY,
+        PreparedDictionaryMatchState, ROW_LAZY_TRACE_MAX_STEPS, SequenceTraceChainSearch,
+        SequenceTraceEmission, SequenceTraceEmissionKind, SequenceTraceMatchSource,
+        SequenceTraceRowLazyProbe, SequenceTraceRowLazyStopReason, SequenceTraceRowSearch,
         build_prepared_dictionary_match_state, count_match_length_with_prefix,
         debug_row_hash_for_params, explicit_offbase, extend_back_logical_match_with_min_start,
         hash_long_at, hash_short_cache_src_at_mls, logical_match_has_length, long_entry_pos,
@@ -7327,7 +7327,7 @@ mod tests {
             );
             let long_hash = hash_long_at(&case.input, pos, src_finder.long_hash_bits);
             let src_short_entry = src_finder.short_heads[tagged_index(sht)];
-            let src_short = if src_short_entry != NO_POS {
+            let src_short = if src_short_entry != NO_TAGGED_ENTRY {
                 tagged_pos(src_short_entry) as u32
             } else {
                 NO_POS
@@ -7392,14 +7392,14 @@ mod tests {
             );
             let long_hash = hash_long_at(&case.input, pos, src_finder.long_hash_bits);
             let src_short_entry = src_finder.short_heads[tagged_index(sht)];
-            let src_short = if src_short_entry != NO_POS {
+            let src_short = if src_short_entry != NO_TAGGED_ENTRY {
                 tagged_pos(src_short_entry) as u32
             } else {
                 NO_POS
             };
             let src_long = long_entry_pos(src_finder.long_entries[tagged_index(long_hash)]);
             let prefix_short_entry = prefix_finder.short_heads[tagged_index(sht)];
-            let prefix_short = if prefix_short_entry != NO_POS {
+            let prefix_short = if prefix_short_entry != NO_TAGGED_ENTRY {
                 tagged_pos(prefix_short_entry) as u32
             } else {
                 NO_POS
@@ -7545,20 +7545,20 @@ mod tests {
             let prefix_short_raw = prefix_finder.short_heads[tagged_index(sht)];
             let prefix_long_raw =
                 long_entry_pos(prefix_finder.long_entries[tagged_index(long_hash)]);
-            let src_short = if src_short_raw != NO_POS {
+            let src_short = if src_short_raw != NO_TAGGED_ENTRY {
                 tagged_pos(src_short_raw)
             } else {
                 NO_POS as usize
             };
             let src_long = src_long_raw as usize;
-            let prefix_short = if prefix_short_raw != NO_POS {
+            let prefix_short = if prefix_short_raw != NO_TAGGED_ENTRY {
                 tagged_pos(prefix_short_raw)
             } else {
                 NO_POS as usize
             };
             let prefix_long = prefix_long_raw as usize;
 
-            let src_short_len = (src_short_raw != NO_POS
+            let src_short_len = (src_short_raw != NO_TAGGED_ENTRY
                 && src_short < pos
                 && case.input[src_short..].len() >= MIN_MATCH
                 && logical_match_has_length(
@@ -7594,7 +7594,7 @@ mod tests {
                     prefix_len + pos,
                 )
             });
-            let prefix_short_len = (prefix_short_raw != NO_POS
+            let prefix_short_len = (prefix_short_raw != NO_TAGGED_ENTRY
                 && logical_match_has_length(
                     prefix,
                     &case.input,
@@ -7613,7 +7613,7 @@ mod tests {
 
             eprintln!(
                 "dense raw-dictionary L3 pos={pos} src_short={src_short} src_short_len={src_short_len:?} src_long={src_long} src_long_len={src_long_len:?} prefix_short={:?} prefix_short_len={prefix_short_len:?} prefix_long={:?} prefix_long_len={prefix_long_len:?}",
-                (prefix_short_raw != NO_POS).then_some(prefix_short),
+                (prefix_short_raw != NO_TAGGED_ENTRY).then_some(prefix_short),
                 (prefix_long_raw != NO_POS).then_some(prefix_long),
             );
         }
@@ -7661,7 +7661,7 @@ mod tests {
             .iter_mut()
             .zip(src_finder.short_heads.iter().copied())
         {
-            if src_entry != NO_POS {
+            if src_entry != NO_TAGGED_ENTRY {
                 let pos = tagged_pos(src_entry) as u32;
                 *dst = tagged_entry(prefix_len + pos as usize, src_entry as usize);
             }
@@ -7703,7 +7703,7 @@ mod tests {
             let long_hash = hash_long_at(&case.input, ip, combined_finder.long_hash_bits);
             let match_long_index_raw =
                 long_entry_pos(combined_finder.long_entries[tagged_index(long_hash)]);
-            let match_index = if match_index_raw != NO_POS {
+            let match_index = if match_index_raw != NO_TAGGED_ENTRY {
                 tagged_pos(match_index_raw)
             } else {
                 NO_POS as usize
@@ -7803,7 +7803,7 @@ mod tests {
                 )
                 .unwrap();
                 ip = anchor;
-            } else if match_index_raw != NO_POS
+            } else if match_index_raw != NO_TAGGED_ENTRY
                 && logical_match_has_length(
                     prefix,
                     &case.input,
@@ -8035,7 +8035,7 @@ mod tests {
             .iter_mut()
             .zip(src_finder.short_heads.iter().copied())
         {
-            if src_entry != NO_POS {
+            if src_entry != NO_TAGGED_ENTRY {
                 let pos = tagged_pos(src_entry) as u32;
                 *dst = tagged_entry(prefix_len + pos as usize, src_entry as usize);
             }
@@ -8077,7 +8077,7 @@ mod tests {
             let long_hash = hash_long_at(&case.input, ip, combined_finder.long_hash_bits);
             let match_long_index_raw =
                 long_entry_pos(combined_finder.long_entries[tagged_index(long_hash)]);
-            let match_index = if match_index_raw != NO_POS {
+            let match_index = if match_index_raw != NO_TAGGED_ENTRY {
                 tagged_pos(match_index_raw)
             } else {
                 NO_POS as usize
@@ -8177,7 +8177,7 @@ mod tests {
                 )
                 .unwrap();
                 ip = anchor;
-            } else if match_index_raw != NO_POS
+            } else if match_index_raw != NO_TAGGED_ENTRY
                 && logical_match_has_length(
                     prefix,
                     &case.input,

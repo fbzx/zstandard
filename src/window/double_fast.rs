@@ -24,12 +24,11 @@ pub(crate) struct DoubleFastFinder {
     /// has to travel with the position because they are read together every
     /// iteration, and holding them in two arrays means two cache lines and
     /// two stores per iteration against upstream's one of each. It cannot
-    /// share a `u32` with the position the way the short table's tag does,
-    /// because this table files raw source indices that run to the length of
-    /// the whole input on the one-shot path and a 24-bit field wraps every
-    /// one past 16 MiB.
+    /// share a `u32` with the position because the one-shot path files raw
+    /// source indices beyond 16 MiB. Both tables keep the position and tag
+    /// together in a `u64`.
     pub(crate) long_entries: Vec<u64>,
-    pub(crate) short_heads: Vec<u32>,
+    pub(crate) short_heads: Vec<u64>,
     pub(crate) long_hash_bits: u32,
     pub(crate) short_hash_bits: u32,
     pub(crate) min_match: u32,
@@ -44,7 +43,7 @@ impl DoubleFastFinder {
         let short_hash_bits = tagged_match_hash_bits(short_hash_bits);
         Self {
             long_entries: vec![LONG_ENTRY_EMPTY; 1usize << long_hash_bits],
-            short_heads: vec![NO_POS; 1usize << short_hash_bits],
+            short_heads: vec![NO_TAGGED_ENTRY; 1usize << short_hash_bits],
             long_hash_bits,
             short_hash_bits,
             min_match: min_match.clamp(4, 7),
@@ -99,7 +98,7 @@ impl DoubleFastFinder {
     /// `short_hash_bits`.
     #[allow(unsafe_code)]
     #[inline(always)]
-    pub(crate) unsafe fn get_short_head(&self, hash: usize) -> u32 {
+    pub(crate) unsafe fn get_short_head(&self, hash: usize) -> u64 {
         debug_assert!(hash < self.short_heads.len());
         // SAFETY: `hash` is in bounds by contract.
         unsafe { *self.short_heads.get_unchecked(hash) }
@@ -112,10 +111,10 @@ impl DoubleFastFinder {
     /// `hash < self.short_heads.len()`.
     #[allow(unsafe_code)]
     #[inline(always)]
-    pub(crate) unsafe fn set_short_head(&mut self, hash: usize, pos: u32) {
+    pub(crate) unsafe fn set_short_head(&mut self, hash: usize, entry: u64) {
         debug_assert!(hash < self.short_heads.len());
         // SAFETY: `hash` is in bounds by contract.
-        unsafe { *self.short_heads.get_unchecked_mut(hash) = pos };
+        unsafe { *self.short_heads.get_unchecked_mut(hash) = entry };
     }
 
     #[inline(always)]
@@ -142,7 +141,7 @@ impl DoubleFastFinder {
 
     pub(crate) fn reset(&mut self) {
         self.long_entries.fill(LONG_ENTRY_EMPTY);
-        self.short_heads.fill(NO_POS);
+        self.short_heads.fill(NO_TAGGED_ENTRY);
     }
 
     /// Rebase every filed position by `delta`.
@@ -1372,12 +1371,12 @@ fn write_back_extdict_source_tables(
         .iter_mut()
         .zip(combined_finder.short_heads.iter().copied())
     {
-        let pos = tagged_pos(entry) as u32;
-        *dst = if entry != NO_POS && pos >= source_base_u32 {
+        let pos = tagged_pos(entry);
+        *dst = if entry != NO_TAGGED_ENTRY && pos >= source_base {
             // Preserve the tag bits, adjust the position
-            tagged_entry((pos - source_base_u32) as usize, entry as usize)
+            tagged_entry(pos - source_base, entry as usize)
         } else {
-            NO_POS
+            NO_TAGGED_ENTRY
         };
     }
     // A slot names the same eight bytes on both sides, so its tag carries over
@@ -1606,12 +1605,12 @@ fn plan_sequences_double_fast_with_ext_dict_from_into(
         .iter_mut()
         .zip(src_finder.short_heads.iter().copied())
     {
-        if src_entry != NO_POS {
-            let pos = tagged_pos(src_entry) as u32;
-            *dst = tagged_entry((source_base_u32 + pos) as usize, src_entry as usize);
-        } else if *dst != NO_POS {
-            let pos = tagged_pos(*dst) as u32;
-            *dst = tagged_entry((prefix_base_u32 + pos) as usize, *dst as usize);
+        if src_entry != NO_TAGGED_ENTRY {
+            let pos = tagged_pos(src_entry);
+            *dst = tagged_entry(source_base + pos, src_entry as usize);
+        } else if *dst != NO_TAGGED_ENTRY {
+            let pos = tagged_pos(*dst);
+            *dst = tagged_entry(prefix_base + pos, *dst as usize);
         }
     }
     for (dst, src_entry) in combined_finder
@@ -1718,7 +1717,7 @@ fn plan_sequences_double_fast_with_ext_dict_from_into(
                 SequenceTraceMatchSource::Unknown,
             )?;
             ip = anchor;
-        } else if short_entry != NO_POS
+        } else if short_entry != NO_TAGGED_ENTRY
             && match_index >= logical_low
             && match_index < current_logical
             && extdict_match_u32(prefix, src, prefix_base, match_index, current_logical)
@@ -2059,7 +2058,7 @@ fn plan_sequences_double_fast_with_prepared_dict_inner<const MLS: u32>(
                 found = Some(long_match);
                 found_source = long_source;
             } else {
-                let source_short_candidate = (src_short_entry != NO_POS
+                let source_short_candidate = (src_short_entry != NO_TAGGED_ENTRY
                     && src_short_candidate >= source_low
                     && src_short_candidate < ip)
                     .then(|| prefix_len + src_short_candidate);
@@ -2333,7 +2332,8 @@ pub(crate) fn search_double_fast_without_prefix(
     }
 
     let short_match =
-        if short_entry != NO_POS && short_candidate >= window_low && short_candidate < pos {
+        if short_entry != NO_TAGGED_ENTRY && short_candidate >= window_low && short_candidate < pos
+        {
             #[allow(unsafe_code)]
             let length = unsafe { count_match_length_unchecked(src, short_candidate, pos) };
             (length >= MIN_MATCH).then(|| DoubleFastMatch {
@@ -2467,7 +2467,7 @@ pub(crate) fn search_double_fast_with_prefix(
         ));
     }
 
-    let src_short_match = if src_short_entry != NO_POS
+    let src_short_match = if src_short_entry != NO_TAGGED_ENTRY
         && src_short_candidate >= source_low
         && src_short_candidate < pos
     {
@@ -2481,7 +2481,7 @@ pub(crate) fn search_double_fast_with_prefix(
         None
     };
 
-    let prefix_short_match = (prefix_short_entry != NO_POS
+    let prefix_short_match = (prefix_short_entry != NO_TAGGED_ENTRY
         && prefix_short_candidate >= prefix_low
         && prefix_short_candidate + MIN_MATCH <= prefix.len()
         && logical_match_has_length(

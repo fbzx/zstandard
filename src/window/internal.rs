@@ -15,7 +15,8 @@ pub(crate) const MAX_MATCH_HASH_BITS: u32 = 25;
 /// holds at 24. Nothing a compression level selects comes close: the widest
 /// `hash_log` on a `Fast` or `DoubleFast` row is 17. This binds only for a
 /// caller who overrides `hash_log` or `chain_log` above 24 and lands on one of
-/// those two parsers, and there it costs table size, not correctness.
+/// those two parsers, and there it costs table size, not correctness. The
+/// bound is kept for the 32-bit hash; entry positions are independent of it.
 pub(crate) const MAX_TAGGED_MATCH_HASH_BITS: u32 = 32 - SHORT_CACHE_TAG_BITS;
 
 /// The hash width a finder will actually build for a requested `hash_log`.
@@ -29,7 +30,7 @@ pub(crate) const fn match_hash_bits(requested: u32) -> u32 {
     }
 }
 
-/// [`match_hash_bits`] for a table that carries a short-cache tag.
+/// [`match_hash_bits`] bounded by the 32-bit hash's room for a short-cache tag.
 ///
 /// Kept as a function rather than inlined at each site so the construction of
 /// a finder and the test for whether a cached one can be reused cannot drift
@@ -188,6 +189,8 @@ pub(crate) const FAST_FILL_STEP: usize = 3;
 pub(crate) const FAST_FILL_HASH_READ_SIZE: usize = 8;
 pub(crate) const ROW_HASH_TAG_BITS: u32 = 8;
 pub(crate) const SHORT_CACHE_TAG_BITS: u32 = 8;
+/// An empty slot in a tagged table: [`NO_POS`] widened to the entry type.
+pub(crate) const NO_TAGGED_ENTRY: u64 = NO_POS as u64;
 pub(crate) const SHORT_CACHE_TAG_MASK: u32 = (1 << SHORT_CACHE_TAG_BITS) - 1;
 pub(crate) const SHORT_CACHE_TAG_MASK_USIZE: usize = SHORT_CACHE_TAG_MASK as usize;
 pub(crate) const ROW_HASH_CACHE_SIZE: usize = 8;
@@ -3359,21 +3362,22 @@ pub(crate) fn hash_at_mls_const_tagged<const MLS: u32>(
 }
 
 /// Build a tagged hash-table entry from a position and hash_and_tag value.
-/// The entry stores the position in bits [31:8] and the tag in bits [7:0].
+/// The 64-bit entry stores the position in bits [63:8] and the tag in bits
+/// [7:0], so positions beyond 16 MiB survive intact.
 #[inline(always)]
-pub(crate) fn tagged_entry(pos: usize, hash_and_tag: usize) -> u32 {
-    ((pos as u32) << SHORT_CACHE_TAG_BITS) | (hash_and_tag as u32 & SHORT_CACHE_TAG_MASK)
+pub(crate) fn tagged_entry(pos: usize, hash_and_tag: usize) -> u64 {
+    ((pos as u64) << SHORT_CACHE_TAG_BITS) | (hash_and_tag as u64 & SHORT_CACHE_TAG_MASK as u64)
 }
 
 /// Extract the position from a tagged hash-table entry.
 #[inline(always)]
-pub(crate) fn tagged_pos(entry: u32) -> usize {
+pub(crate) fn tagged_pos(entry: u64) -> usize {
     (entry >> SHORT_CACHE_TAG_BITS) as usize
 }
 
 /// Check whether the tag in a hash-table entry matches the tag from a hash_and_tag value.
 #[inline(always)]
-pub(crate) fn tag_matches(entry: u32, hash_and_tag: usize) -> bool {
+pub(crate) fn tag_matches(entry: u64, hash_and_tag: usize) -> bool {
     (entry as usize ^ hash_and_tag) & SHORT_CACHE_TAG_MASK_USIZE == 0
 }
 
@@ -3409,9 +3413,8 @@ pub(crate) fn shift_raw_positions(table: &mut [u32], delta: usize, empty: u32) {
 /// The long double-fast table's entry layout: a filed position with the slot's
 /// tag byte below it.
 ///
-/// The short table packs the same two things into a `u32`, which leaves the
-/// position 24 bits. The long table cannot afford that: the one-shot encoder
-/// hands the parser the whole input, so its positions run to the frame length,
+/// Both tables need more than 24 position bits: the one-shot encoder hands
+/// the parser the whole input, so its positions run to the frame length,
 /// and a 24-bit field wraps every one past 16 MiB. A 64-bit entry keeps the
 /// position at the full `u32` width the table has always filed and still reads
 /// and writes as a single value, which is the reason for the width. The parser
@@ -3422,7 +3425,7 @@ pub(crate) const LONG_ENTRY_TAG_MASK: u64 = SHORT_CACHE_TAG_MASK as u64;
 
 /// An entry naming no position. [`long_entry_pos`] decodes it to [`NO_POS`], so
 /// the position tests that already rejected `NO_POS` need no special case.
-pub(crate) const LONG_ENTRY_EMPTY: u64 = (NO_POS as u64) << SHORT_CACHE_TAG_BITS;
+pub(crate) const LONG_ENTRY_EMPTY: u64 = (NO_TAGGED_ENTRY) << SHORT_CACHE_TAG_BITS;
 
 /// Build a long table entry from a position and the hash that chose its slot.
 #[inline(always)]
@@ -3509,14 +3512,14 @@ pub(crate) fn shift_raw_positions_preserving(
 /// The tag identifies which bytes the entry was filed under and does not move
 /// with the buffer, so it survives the shift untouched. Emptied slots take
 /// [`NO_POS`], which is what [`FastFinder::reset`] fills a table with.
-pub(crate) fn shift_tagged_positions(table: &mut [u32], delta: usize) {
+pub(crate) fn shift_tagged_positions(table: &mut [u64], delta: usize) {
     for entry in table.iter_mut() {
-        if *entry == NO_POS {
+        if *entry == NO_TAGGED_ENTRY {
             continue;
         }
         *entry = match tagged_pos(*entry).checked_sub(delta) {
             Some(pos) => tagged_entry(pos, *entry as usize),
-            None => NO_POS,
+            None => NO_TAGGED_ENTRY,
         };
     }
 }
@@ -3726,4 +3729,23 @@ pub(crate) fn hash_bytes_long(bytes: [u8; 8], hash_bits: u32) -> usize {
 pub(crate) fn hash_bytes_long_short_cache(bytes: [u8; 8], hash_bits: u32) -> usize {
     let value = u64::from_le_bytes(bytes).wrapping_mul(0xCF1B_BCDC_B7A5_6463);
     (value >> (64 - hash_bits)) as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tagged_entries_preserve_positions_past_16_mib() {
+        for pos in [1 << 24, (1 << 24) + 1] {
+            for tag in 0..=SHORT_CACHE_TAG_MASK_USIZE {
+                let hash_and_tag = (123 << SHORT_CACHE_TAG_BITS) | tag;
+                let entry = tagged_entry(pos, hash_and_tag);
+                assert_eq!(tagged_pos(entry), pos);
+                assert_eq!(entry & SHORT_CACHE_TAG_MASK as u64, tag as u64);
+                assert!(tag_matches(entry, hash_and_tag));
+                assert!(!tag_matches(entry, hash_and_tag ^ 1));
+            }
+        }
+    }
 }
