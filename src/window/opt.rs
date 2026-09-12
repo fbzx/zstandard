@@ -730,14 +730,25 @@ impl<const IS_ULTRA: bool> OptimalPriceModel<IS_ULTRA> {
             - self.weight(self.ll_freq[ll_code])
     }
 
+    /// C's `ZSTD_getMatchPrice`, as the sum of [`offset_price`](Self::offset_price)
+    /// and [`match_length_price`](Self::match_length_price).
+    ///
+    /// Split so that a loop pricing one candidate at every length can pay
+    /// for the offset once. The terms are the same ones C adds, in a
+    /// different order, which changes nothing: every intermediate is a small
+    /// unsigned sum that neither wraps nor goes below zero.
     #[inline(always)]
     pub(crate) fn match_price(&self, offset_value: u32, match_length: u32) -> u32 {
+        self.offset_price(offset_value) + self.match_length_price(match_length)
+    }
+
+    /// The part of a match's price that depends only on its offset.
+    #[inline(always)]
+    pub(crate) fn offset_price(&self, offset_value: u32) -> u32 {
         let off_code = offset_code_unchecked(offset_value) as usize;
-        let ml_code = match_length_code_unchecked(match_length) as usize;
 
         if matches!(self.price_type, OptimalPriceType::Predefined) {
-            return self.weight(match_length.wrapping_sub(OPT_REPCODE_MIN_MATCH as u32))
-                + (16 + off_code as u32) * OPT_PRICE_UNIT;
+            return (16 + off_code as u32) * OPT_PRICE_UNIT;
         }
 
         let mut price = off_code as u32 * OPT_PRICE_UNIT + self.of_sum_base_price
@@ -745,9 +756,19 @@ impl<const IS_ULTRA: bool> OptimalPriceModel<IS_ULTRA> {
         if self.long_offset_penalty && off_code >= 20 {
             price += (off_code as u32 - 19) * 2 * OPT_PRICE_UNIT;
         }
-        price += ml_bits(ml_code as u8) * OPT_PRICE_UNIT + self.ml_sum_base_price
-            - self.weight(self.ml_freq[ml_code]);
         price + OPT_PRICE_UNIT / 5
+    }
+
+    /// The part of a match's price that depends only on its length.
+    #[inline(always)]
+    pub(crate) fn match_length_price(&self, match_length: u32) -> u32 {
+        if matches!(self.price_type, OptimalPriceType::Predefined) {
+            return self.weight(match_length.wrapping_sub(OPT_REPCODE_MIN_MATCH as u32));
+        }
+
+        let ml_code = match_length_code_unchecked(match_length) as usize;
+        ml_bits(ml_code as u8) * OPT_PRICE_UNIT + self.ml_sum_base_price
+            - self.weight(self.ml_freq[ml_code])
     }
 
     pub(crate) fn update_stats(
@@ -1795,10 +1816,13 @@ pub(crate) fn update_optimal_match_nodes<const IS_ULTRA: bool>(
         // Scan downward: from max_length down to previous_length+1.
         let start_ml = previous_length + 1;
         let mut ml = max_length;
+        // The offset does not change over the scan, so its share of the price
+        // is paid once here rather than once per length.
+        let candidate_price = base_price + price_model.offset_price(candidate.offset_value);
         while ml >= start_ml {
             let pos = cur + ml as usize;
             debug_assert!(pos <= horizon && pos < nodes.len());
-            let price = base_price + price_model.match_price(candidate.offset_value, ml);
+            let price = candidate_price + price_model.match_length_price(ml);
             // C lines 1318-1326: when pos extends beyond the frontier,
             // gap-fill intermediate positions with MAX_PRICE sentinel.
             // SAFETY: pos = cur + ml where ml <= max_reach = horizon - cur,
