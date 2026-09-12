@@ -26,6 +26,16 @@ pub(crate) struct OptimalPriceModel<const IS_ULTRA: bool> {
     pub(crate) ml_sum_base_price: u32,
     pub(crate) of_sum_base_price: u32,
     pub(crate) lit_sum_base_price: u32,
+    /// [`match_length_price`](Self::match_length_price) for every match
+    /// length code, refreshed by [`set_base_prices`](Self::set_base_prices).
+    ///
+    /// The optimal parser prices each candidate at every length it can take,
+    /// which is where most of a level-19 encode goes, and the length's share
+    /// of the price depends on nothing but the code and the current
+    /// statistics. The statistics change only through `set_base_prices`, so
+    /// the 53 values are recomputed there once per sequence rather than once
+    /// per length per candidate. Read only under `Dynamic` pricing.
+    ml_price_by_code: [u32; 53],
     /// Penalize long offsets (off_code >= 20). True for btopt/btultra,
     /// false for btultra2 (matching C's optLevel < 2 check).
     pub(crate) long_offset_penalty: bool,
@@ -565,6 +575,7 @@ impl<const IS_ULTRA: bool> OptimalPriceModel<IS_ULTRA> {
                 ml_sum_base_price: 0,
                 of_sum_base_price: 0,
                 lit_sum_base_price: 0,
+                ml_price_by_code: [0; 53],
                 long_offset_penalty,
                 compressed_literals,
             };
@@ -590,6 +601,7 @@ impl<const IS_ULTRA: bool> OptimalPriceModel<IS_ULTRA> {
             ml_sum_base_price: 0,
             of_sum_base_price: 0,
             lit_sum_base_price: 0,
+            ml_price_by_code: [0; 53],
             long_offset_penalty,
             compressed_literals,
         };
@@ -644,6 +656,11 @@ impl<const IS_ULTRA: bool> OptimalPriceModel<IS_ULTRA> {
         if self.compressed_literals {
             self.lit_sum_base_price = self.weight(self.lit_sum);
         }
+        for code in 0..self.ml_price_by_code.len() {
+            self.ml_price_by_code[code] = ml_bits(code as u8) * OPT_PRICE_UNIT
+                + self.ml_sum_base_price
+                - self.weight(self.ml_freq[code]);
+        }
     }
 
     /// Create a price model from rescaled cross-block state.
@@ -666,6 +683,7 @@ impl<const IS_ULTRA: bool> OptimalPriceModel<IS_ULTRA> {
             ml_sum_base_price: 0,
             of_sum_base_price: 0,
             lit_sum_base_price: 0,
+            ml_price_by_code: [0; 53],
             long_offset_penalty,
             compressed_literals,
         };
@@ -767,8 +785,12 @@ impl<const IS_ULTRA: bool> OptimalPriceModel<IS_ULTRA> {
         }
 
         let ml_code = match_length_code_unchecked(match_length) as usize;
-        ml_bits(ml_code as u8) * OPT_PRICE_UNIT + self.ml_sum_base_price
-            - self.weight(self.ml_freq[ml_code])
+        debug_assert_eq!(
+            self.ml_price_by_code[ml_code],
+            ml_bits(ml_code as u8) * OPT_PRICE_UNIT + self.ml_sum_base_price
+                - self.weight(self.ml_freq[ml_code])
+        );
+        self.ml_price_by_code[ml_code]
     }
 
     pub(crate) fn update_stats(

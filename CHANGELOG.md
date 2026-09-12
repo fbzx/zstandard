@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- The optimal parser, levels 16 and up, spends less of its time pricing candidates. It priced one candidate at every length it could take and paid the whole match price at each step; the offset's share is now paid once per candidate and the length's share is read from a table that `set_base_prices` refreshes once per sequence chain. Output is byte-identical at every level. On the benchmark corpora, levels 19 to 22 encode 14 to 42 % faster on wikipedia, 29 to 33 % on the raw-dictionary case, 14 to 22 % on the trained-dictionary case and 7 to 12 % on json-records and log-lines, with the remaining corpora inside run-to-run noise.
+
 ## [0.1.4] - 2026-08-31
 
 ### Changed
