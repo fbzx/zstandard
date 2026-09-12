@@ -3227,6 +3227,98 @@ fn streaming_block_layout_matches_upstream_streaming() {
     }
 }
 
+/// A stream that pledges its size produces the frame upstream's streaming
+/// encoder produces under the same pledge, byte for byte, down to a frame
+/// whose content is exactly one block, and wherever the two one-shot encoders
+/// already agree.
+///
+/// The single-block case is the one that had drifted. Our buffer filled on the
+/// last pledged byte and the block went out unflagged, followed by an empty
+/// last block from `finish`. Upstream sets its buffer target one byte past the
+/// block size when the pledge equals it (`ZSTD_CCtx_init_compressStream2`,
+/// `zstd_compress.c`), so its only block waits for `ZSTD_e_end` and carries
+/// the flag itself. `compress_streaming_once` cannot observe this because it
+/// never pledges; the advanced streaming mode can.
+///
+/// Three claims, checked separately so a failure names its side: our pledged
+/// stream is our one-shot frame; upstream's pledged stream is upstream's
+/// one-shot frame; and where the one-shot frames agree, so do the streams.
+/// They do not agree on the 539-byte input at levels 9 and 19, where our
+/// one-shot parser is one byte over upstream's, which is a parse tie of the
+/// kind `KNOWN_UPSTREAM_SIZE_GAPS` records and nothing the stream adds.
+///
+/// Level 19 is left out above one block for the reason
+/// `streaming_block_layout_matches_upstream_streaming` gives: the optimal
+/// parsers split a block where upstream does not, a separate and chosen
+/// deviation. A single block has nothing to split.
+#[test]
+fn a_pledged_stream_matches_upstream_streaming_under_the_same_pledge() {
+    let Some(helper) = upstream_trace_helper::helper_path() else {
+        return;
+    };
+    const PIECE: usize = 32 * 1024;
+    let single_block: &[usize] = &[1, 539, 4096, 36_827, 128 * 1024];
+    let multi_block: &[usize] = &[128 * 1024 + 1, 300 * 1024];
+
+    for (sizes, levels) in [
+        (single_block, &[1, 3, 9, 19][..]),
+        (multi_block, &[1, 3, 9][..]),
+    ] {
+        for &size in sizes {
+            let input = build_pattern(size);
+            for &level in levels {
+                let options = EncoderOptions {
+                    compression_level: CompressionLevel::try_new(level).unwrap(),
+                    pledged_src_size: Some(size as u64),
+                    ..Default::default()
+                };
+                let settings = [
+                    format!("compressionLevel={level}"),
+                    format!("pledgedSrcSize={size}"),
+                ];
+                let ours = stream_encode(&input, options, PIECE);
+                let ours_one_shot = encode_all_with_options(&input, options).unwrap();
+                let theirs = upstream_trace_helper::compress_advanced_streaming(
+                    helper,
+                    upstream_trace_helper::DICT_NONE,
+                    PIECE,
+                    &settings,
+                    &input,
+                );
+                let theirs_one_shot = upstream_trace_helper::compress_advanced(
+                    helper,
+                    upstream_trace_helper::DICT_NONE,
+                    &settings[..1],
+                    &input,
+                );
+
+                assert_eq!(decode_all(&ours).unwrap(), input);
+                assert_eq!(
+                    ours, ours_one_shot,
+                    "{size} bytes at level {level}: our pledged stream differs from our one-shot frame"
+                );
+                assert_eq!(
+                    theirs, theirs_one_shot,
+                    "{size} bytes at level {level}: upstream's pledged stream differs from its one-shot frame"
+                );
+                if ours_one_shot == theirs_one_shot {
+                    assert_eq!(
+                        ours, theirs,
+                        "{size} bytes at level {level}: pledged streaming frame differs from upstream's"
+                    );
+                } else {
+                    assert!(
+                        size == 539 && (level == 9 || level == 19),
+                        "{size} bytes at level {level}: one-shot frames differ from upstream's, {} against {} bytes",
+                        ours_one_shot.len(),
+                        theirs_one_shot.len(),
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Streaming a frame long enough to compact its buffer several times must stay
 /// at upstream's size, which is the case a shorter frame cannot cover: below
 /// twice the window the encoder never compacts at all and this whole path is
