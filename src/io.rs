@@ -65,6 +65,15 @@ use crate::{
 /// one buffered for the next one.
 const READ_CHUNK: usize = StreamingDecoder::RECOMMENDED_INPUT_SIZE;
 
+/// First refill size. The chunk grows toward `READ_CHUNK` only when a refill
+/// fills it, so a source shorter than this never pays for the full buffer.
+///
+/// `READ_CHUNK` is above the threshold at which the macOS allocator serves an
+/// allocation from fresh pages rather than from a free list, and the reader
+/// zeroes it whole up front; on a source of a few hundred bytes that mapping
+/// and its page faults were most of what `Reader` cost over `decode_all`.
+const READ_CHUNK_INITIAL: usize = 32768;
+
 impl From<Error> for io::Error {
     fn from(error: Error) -> Self {
         // `Error` covers malformed input and rejected configuration, neither
@@ -246,7 +255,7 @@ impl<R: Read> Reader<'static, R> {
         Self {
             inner,
             decoder: StreamingDecoder::new(options),
-            chunk: vec![0u8; READ_CHUNK],
+            chunk: Vec::new(),
             input_done: false,
             finished: false,
         }
@@ -266,7 +275,7 @@ impl<'a, R: Read> Reader<'a, R> {
         Self {
             inner,
             decoder: StreamingDecoder::with_prepared_dict(dictionary, options),
-            chunk: vec![0u8; READ_CHUNK],
+            chunk: Vec::new(),
             input_done: false,
             finished: false,
         }
@@ -299,8 +308,9 @@ impl<'a, R: Read> Reader<'a, R> {
     ///
     /// It is empty after a read that ran to completion, and also after a
     /// partial read, which is worth stating because it looks like it should
-    /// not be: this reader pulls in 64 KiB chunks and the decoder consumes a
-    /// whole chunk into its output buffer before any of it is handed out. A
+    /// not be: this reader pulls in chunks of up to 128 KiB and the decoder
+    /// consumes a whole chunk into its output buffer before any of it is
+    /// handed out. A
     /// caller that reads sixteen bytes and stops has usually already drained
     /// its source and decoded all of it. Stopping a read early therefore
     /// discards decompressed output and recovers nothing on the compressed
@@ -338,13 +348,31 @@ impl<R: Read> Read for Reader<'_, R> {
                 continue;
             }
 
-            let read = self.inner.read(&mut self.chunk)?;
-            if read == 0 {
+            if self.refill()? == 0 {
                 self.input_done = true;
-            } else {
-                self.decoder.push(&self.chunk[..read])?;
             }
         }
+    }
+}
+
+impl<R: Read> Reader<'_, R> {
+    /// Pull one chunk from the inner reader and push it to the decoder,
+    /// returning how much arrived. The chunk is allocated on first use and
+    /// grows to `READ_CHUNK` after a refill that filled it, so a short source
+    /// stays on a small buffer and a long one moves to the full size after
+    /// its first read.
+    fn refill(&mut self) -> io::Result<usize> {
+        if self.chunk.is_empty() {
+            self.chunk = vec![0u8; READ_CHUNK_INITIAL];
+        }
+        let read = self.inner.read(&mut self.chunk)?;
+        if read != 0 {
+            self.decoder.push(&self.chunk[..read])?;
+        }
+        if read == self.chunk.len() && read < READ_CHUNK {
+            self.chunk = vec![0u8; READ_CHUNK];
+        }
+        Ok(read)
     }
 }
 
