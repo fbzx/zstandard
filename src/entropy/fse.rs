@@ -1,6 +1,6 @@
 use crate::{
     entropy::{
-        bitstream::{BitCStream, BitDStream, BitDStreamStatus},
+        bitstream::{BitCStream, BitDStream, BitDStreamStatus, CONTAINER_BITS, CONTAINER_BYTES},
         mem::highbit32,
     },
     error::{Error, Result},
@@ -991,7 +991,7 @@ pub(crate) fn build_offset_sequence_dtable_direct(
 /// Initialize a DState from a SequenceDTable.
 #[inline(always)]
 pub(crate) fn init_dstate_seq(bit_d: &mut BitDStream, dt: &SequenceDTable) -> DState {
-    let state = bit_d.read_bits(dt.table_log as u32);
+    let state = bit_d.read_bits(dt.table_log as u32) as usize;
     let _ = bit_d.reload();
     DState { state }
 }
@@ -1006,7 +1006,7 @@ pub(crate) fn update_state_with_seq_entry_fast(
     entry: SequenceDecodeEntry,
 ) {
     let nb_bits = entry.nb_bits as u32;
-    let low_bits = bit_d.read_bits_fast_zero_safe(nb_bits);
+    let low_bits = bit_d.read_bits_fast_zero_safe(nb_bits) as usize;
     state.state = entry.new_state as usize + low_bits;
 }
 
@@ -1192,7 +1192,7 @@ pub(crate) fn encode_symbol(
 
     let transform = ct.symbol_tt[symbol as usize];
     let nb_bits_out = (state.value + transform.delta_nb_bits) >> 16;
-    bit_c.add_bits(state.value as usize, nb_bits_out);
+    bit_c.add_bits(state.value.into(), nb_bits_out);
     let next_index = ((state.value >> nb_bits_out) as i32 + transform.delta_find_state) as usize;
     state.value = u32::from(*ct.state_table.get(next_index).ok_or(Error::Corruption(
         "FSE compression state exceeds table size",
@@ -1221,7 +1221,7 @@ pub(crate) unsafe fn encode_symbol_unchecked(
     // sized to hold every symbol up to that value.
     let transform = unsafe { *ct.symbol_tt.get_unchecked(symbol as usize) };
     let nb_bits_out = (state.value + transform.delta_nb_bits) >> 16;
-    bit_c.add_bits(state.value as usize, nb_bits_out);
+    bit_c.add_bits(state.value.into(), nb_bits_out);
     let next_index = ((state.value >> nb_bits_out) as i32 + transform.delta_find_state) as usize;
     // SAFETY: for a correctly built table, `delta_find_state` maps the shifted
     // state into `state_table`'s range by construction — that is the invariant
@@ -1230,14 +1230,14 @@ pub(crate) unsafe fn encode_symbol_unchecked(
 }
 
 pub(crate) fn flush_cstate(bit_c: &mut BitCStream<'_>, state: &CState, ct: &CTable) -> Result<()> {
-    bit_c.add_bits(state.value as usize, u32::from(ct.table_log));
+    bit_c.add_bits(state.value.into(), u32::from(ct.table_log));
     bit_c.flush_bits();
     Ok(())
 }
 
 #[inline(always)]
 fn block_bound(size: usize) -> usize {
-    size + (size >> 7) + 4 + core::mem::size_of::<usize>()
+    size + (size >> 7) + 4 + CONTAINER_BYTES
 }
 
 fn compress_using_ctable_generic(
@@ -1279,7 +1279,7 @@ fn compress_using_ctable_generic(
     }
 
     let src_size = src.len() - 2;
-    if usize::BITS > (TABLELOG_MAX * 4 + 7) as u32 && (src_size & 2) != 0 {
+    if CONTAINER_BITS > (TABLELOG_MAX * 4 + 7) as u32 && (src_size & 2) != 0 {
         encode_symbol(&mut bit_c, &mut state2, ct, src[ip - 1])?;
         ip -= 1;
         encode_symbol(&mut bit_c, &mut state1, ct, src[ip - 1])?;
@@ -1295,7 +1295,7 @@ fn compress_using_ctable_generic(
         encode_symbol(&mut bit_c, &mut state2, ct, src[ip - 1])?;
         ip -= 1;
 
-        if usize::BITS < (TABLELOG_MAX * 2 + 7) as u32 {
+        if CONTAINER_BITS < (TABLELOG_MAX * 2 + 7) as u32 {
             if fast {
                 bit_c.flush_bits_fast();
             } else {
@@ -1306,7 +1306,7 @@ fn compress_using_ctable_generic(
         encode_symbol(&mut bit_c, &mut state1, ct, src[ip - 1])?;
         ip -= 1;
 
-        if usize::BITS > (TABLELOG_MAX * 4 + 7) as u32 {
+        if CONTAINER_BITS > (TABLELOG_MAX * 4 + 7) as u32 {
             encode_symbol(&mut bit_c, &mut state2, ct, src[ip - 1])?;
             ip -= 1;
             encode_symbol(&mut bit_c, &mut state1, ct, src[ip - 1])?;
@@ -1353,7 +1353,7 @@ pub(crate) fn decode_entry(dt: &DTable, state: usize) -> Result<DecodeEntry> {
 
 #[inline(always)]
 pub(crate) fn init_dstate(bit_d: &mut BitDStream, dt: &DTable) -> DState {
-    let state = bit_d.read_bits(dt.table_log as u32);
+    let state = bit_d.read_bits(dt.table_log as u32) as usize;
     let _ = bit_d.reload();
     DState { state }
 }
@@ -1398,7 +1398,7 @@ pub(crate) fn update_state_with_entry(
         bit_d.read_bits_fast(entry.nb_bits as u32)
     } else {
         bit_d.read_bits(entry.nb_bits as u32)
-    };
+    } as usize;
     state.state = entry.new_state as usize + low_bits;
 }
 
@@ -1414,7 +1414,7 @@ pub(crate) fn update_state_with_entry_fast(
 ) {
     // Branchless: read_bits_fast_zero_safe handles nb_bits == 0 by masking
     // rather than branching.
-    let low_bits = bit_d.read_bits_fast_zero_safe(entry.nb_bits as u32);
+    let low_bits = bit_d.read_bits_fast_zero_safe(entry.nb_bits as u32) as usize;
     state.state = entry.new_state as usize + low_bits;
 }
 
@@ -1429,14 +1429,14 @@ pub(crate) fn decode_symbol(state: &mut DState, bit_d: &mut BitDStream, dt: &DTa
         bit_d.read_bits_fast(info.nb_bits as u32)
     } else {
         bit_d.read_bits(info.nb_bits as u32)
-    };
+    } as usize;
     state.state = info.new_state as usize + low_bits;
     info.symbol
 }
 
 pub(crate) fn decode_symbol_fast(state: &mut DState, bit_d: &mut BitDStream, dt: &DTable) -> u8 {
     let info = dt.entries[state.state];
-    let low_bits = bit_d.read_bits_fast(info.nb_bits as u32);
+    let low_bits = bit_d.read_bits_fast(info.nb_bits as u32) as usize;
     state.state = info.new_state as usize + low_bits;
     info.symbol
 }
@@ -1499,19 +1499,19 @@ fn decompress_using_dtable_generic(
     while bit_d.reload() == BitDStreamStatus::Unfinished && op < olimit {
         dst[op] = get_symbol!(&mut state1);
         op += 1;
-        if (TABLELOG_MAX * 2 + 7) as u32 > usize::BITS {
+        if (TABLELOG_MAX * 2 + 7) as u32 > CONTAINER_BITS {
             let _ = bit_d.reload();
         }
         dst[op] = get_symbol!(&mut state2);
         op += 1;
-        if (TABLELOG_MAX * 4 + 7) as u32 > usize::BITS
+        if (TABLELOG_MAX * 4 + 7) as u32 > CONTAINER_BITS
             && bit_d.reload() != BitDStreamStatus::Unfinished
         {
             break;
         }
         dst[op] = get_symbol!(&mut state1);
         op += 1;
-        if (TABLELOG_MAX * 2 + 7) as u32 > usize::BITS {
+        if (TABLELOG_MAX * 2 + 7) as u32 > CONTAINER_BITS {
             let _ = bit_d.reload();
         }
         dst[op] = get_symbol!(&mut state2);

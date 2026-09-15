@@ -201,11 +201,54 @@ jobs:
       # crate: `proptest` pulls `getrandom`, which refuses
       # wasm32-unknown-unknown without a JS backend, so tests and examples
       # cannot compile there regardless. The library is what consumers link.
+      # This is specific to this triple -- the `wasm32-wasip1` job below
+      # compiles and runs the whole suite, because WASI gives `getrandom` a
+      # backend and gives the harness somewhere to print.
       - name: cargo check (lib)
         run: cargo check --lib --target wasm32-unknown-unknown
 
       - name: cargo check (lib, all features)
         run: cargo check --lib --all-features --target wasm32-unknown-unknown
+
+  # A 32-bit target the suite actually *runs* on. Every other leg of this
+  # workflow is 64-bit, where `usize` happens to be as wide as the entropy
+  # accumulator, so a 32-bit defect can sit in the crate without turning a
+  # single leg red -- one did, through 0.1.4. Compiling for wasm32, which the
+  # job above does, is not the same check and never was.
+  #
+  # Debug and release both, because they fail differently: debug carries
+  # overflow checks and `debug_assert!`, which is what catches `usize`
+  # arithmetic that only wraps at 32 bits, while release is where a
+  # miscomputed value travels into the output instead of stopping.
+  wasm-test:
+    name: wasm32-wasip1 (test)
+    runs-on: ubuntu-latest
+    env:
+      # `--dir host::guest` preopens a directory: wasmtime grants no
+      # filesystem access at all without it, and `tests/baseline.rs` reads its
+      # recorded encoder output from `tests/baselines/encoder.tsv`. Host and
+      # guest paths have to match, because the test resolves that file against
+      # `CARGO_MANIFEST_DIR`.
+      CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime --dir=${{ github.workspace }}::${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+      - uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+          version: "45.0.2"
+
+      # Two tests carry a `target_family = "wasm"` ignore, each for something
+      # WASI lacks rather than anything about this crate: `thread::spawn` and
+      # unwinding, the latter also taking the one `#[should_panic]` test with
+      # it. Nothing else is excluded, and no test binary is skipped.
+      - name: cargo test (debug)
+        run: cargo test --target wasm32-wasip1
+
+      - name: cargo test (release)
+        run: cargo test --release --target wasm32-wasip1
 
   audit:
     name: cargo-audit

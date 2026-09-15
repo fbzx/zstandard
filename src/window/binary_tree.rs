@@ -2360,3 +2360,81 @@ impl LazySearchFinder for BinaryTreeFinder {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `children` past `isize::MAX` bytes is a `capacity overflow` panic
+    /// rather than a refused allocation, and `panic = "abort"` makes that
+    /// unrecoverable. `chain_log` 29 and 30 reach it on a 32-bit target.
+    #[test]
+    fn no_chain_log_in_range_asks_for_a_table_past_the_address_space() {
+        // `ParameterOverrides::CHAIN_LOG`, which `validate` accepts in full on
+        // every target.
+        for chain_log in 6..=30u32 {
+            let slots = 1usize << binary_tree_cycle_log(chain_log);
+            let bytes = slots.checked_mul(2 * size_of::<u32>());
+            assert!(
+                bytes.is_some_and(|bytes| bytes <= isize::MAX as usize),
+                "chain_log {chain_log} sizes children past isize::MAX"
+            );
+        }
+    }
+
+    /// The streaming encoder aligns compaction to
+    /// [`MatchFinderParameters::rebase_period`], so a tree narrowed to fit the
+    /// target has to leave that reading the narrowed cycle too -- otherwise
+    /// every rebase moves nodes out of the slots their positions name.
+    ///
+    /// 32-bit only, and not merely as an optimization: the clamp in
+    /// [`binary_tree_cycle_log`] is what the two readings could disagree about,
+    /// and [`MAX_BINARY_TREE_CYCLE_LOG`] is 59 where `usize` is 64 bits, so no
+    /// `chain_log` the parameters admit reaches it. The assertions would hold
+    /// on a 64-bit host whatever the narrowing did, while the tree they build
+    /// costs two gibibytes of `children`. Keep the gate: running this
+    /// everywhere buys the suite an allocation, not a check.
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn a_narrowed_tree_keeps_the_parameters_rebase_period() {
+        const CHAIN_LOG: u32 = 29;
+        let params = MatchFinderParameters {
+            parser_strategy: ParserStrategy::BinaryTreeLazy2,
+            chain_log: CHAIN_LOG,
+            ..MatchFinderParameters::default()
+        };
+        let finder = BinaryTreeFinder::new(20, CHAIN_LOG, 4);
+        assert_eq!(finder.rebase_period(), params.rebase_period());
+        assert_eq!(finder.children.len(), 2 * params.rebase_period());
+    }
+
+    /// `chain_log` 29 with a binary-tree strategy used to abort the process on
+    /// a 32-bit target. One-shot never reached it -- `adjust_upstream_cparams`
+    /// narrows the cycle log against the window once the source size is known
+    /// -- so the streaming encoder, which has no such hint, is the path that
+    /// has to hold.
+    ///
+    /// 32-bit only, because that is where the abort was: on a 64-bit host
+    /// `chain_log` 29 is an ordinary parameter that no clamp touches, so the
+    /// encode proves nothing about the narrowing and still pays two gibibytes
+    /// for the tree. The `wasm32-wasip1` leg of CI runs the suite on a genuine
+    /// 32-bit `usize`, which is where this one has to pass.
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn a_wide_chain_log_streams_instead_of_aborting() {
+        let options = crate::EncoderOptions {
+            compression_level: crate::CompressionLevel::try_new(3).unwrap(),
+            parameters: crate::ParameterOverrides {
+                strategy: Some(crate::Strategy::BinaryTreeLazy2),
+                chain_log: Some(29),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let input = b"a wide chain log streams a wide chain log streams";
+        let mut encoder = crate::StreamingEncoder::new(options).unwrap();
+        encoder.push(input).unwrap();
+        encoder.finish().unwrap();
+        assert_eq!(crate::decode_all(&encoder.take_output()).unwrap(), input);
+    }
+}

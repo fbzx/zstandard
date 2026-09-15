@@ -1,19 +1,4 @@
 #[inline(always)]
-pub(crate) const fn mem_32bits() -> bool {
-    core::mem::size_of::<usize>() == 4
-}
-
-#[inline(always)]
-pub(crate) const fn mem_64bits() -> bool {
-    core::mem::size_of::<usize>() == 8
-}
-
-#[inline(always)]
-pub(crate) const fn size_of_usize() -> usize {
-    core::mem::size_of::<usize>()
-}
-
-#[inline(always)]
 pub(crate) fn highbit32(value: u32) -> u32 {
     debug_assert!(value != 0);
     31u32 ^ value.leading_zeros()
@@ -41,45 +26,6 @@ pub(crate) unsafe fn read_u32_unchecked(input: &[u8], offset: usize) -> u32 {
     raw.to_le()
 }
 
-#[cfg(target_pointer_width = "64")]
-#[inline(always)]
-pub(crate) fn read_usize(input: &[u8], offset: usize) -> usize {
-    let bytes = input[offset..].first_chunk::<8>().unwrap();
-    usize::from_le_bytes(*bytes)
-}
-
-/// Read a little-endian usize without bounds checking.
-///
-/// # Safety
-///
-/// `offset + size_of::<usize>() <= input.len()` must hold.
-#[cfg(target_pointer_width = "64")]
-#[allow(unsafe_code)]
-#[inline(always)]
-pub(crate) unsafe fn read_usize_unchecked(input: &[u8], offset: usize) -> usize {
-    debug_assert!(offset + 8 <= input.len());
-    // SAFETY: the caller guarantees eight readable bytes at `offset`, which is
-    // `size_of::<usize>()` on this target. Unaligned, so no alignment need.
-    let raw = unsafe { core::ptr::read_unaligned(input.as_ptr().add(offset) as *const u64) };
-    raw.to_le() as usize
-}
-
-/// Read a little-endian usize without bounds checking.
-///
-/// # Safety
-///
-/// `offset + size_of::<usize>() <= input.len()` must hold.
-#[cfg(target_pointer_width = "32")]
-#[allow(unsafe_code)]
-#[inline(always)]
-pub(crate) unsafe fn read_usize_unchecked(input: &[u8], offset: usize) -> usize {
-    debug_assert!(offset + 4 <= input.len());
-    // SAFETY: the caller guarantees four readable bytes at `offset`, which is
-    // `size_of::<usize>()` on this target. Unaligned, so no alignment need.
-    let raw = unsafe { core::ptr::read_unaligned(input.as_ptr().add(offset) as *const u32) };
-    raw.to_le() as usize
-}
-
 #[inline(always)]
 pub(crate) fn read_u64(input: &[u8], offset: usize) -> u64 {
     let bytes = input[offset..].first_chunk::<8>().unwrap();
@@ -102,23 +48,9 @@ pub(crate) unsafe fn read_u64_unchecked(input: &[u8], offset: usize) -> u64 {
     raw.to_le()
 }
 
-#[cfg(target_pointer_width = "32")]
 #[inline(always)]
-pub(crate) fn read_usize(input: &[u8], offset: usize) -> usize {
-    let bytes = input[offset..].first_chunk::<4>().unwrap();
-    usize::from_le_bytes(*bytes)
-}
-
-#[cfg(target_pointer_width = "64")]
-#[inline(always)]
-pub(crate) fn write_usize(output: &mut [u8], offset: usize, value: usize) {
+pub(crate) fn write_u64(output: &mut [u8], offset: usize, value: u64) {
     output[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-}
-
-#[cfg(target_pointer_width = "32")]
-#[inline(always)]
-pub(crate) fn write_usize(output: &mut [u8], offset: usize, value: usize) {
-    output[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
 /// Prefetch data into L1 cache. This is a hint instruction with no correctness impact.
@@ -222,18 +154,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reports_machine_word_width() {
-        assert_eq!(mem_32bits(), size_of_usize() == 4);
-        assert_eq!(mem_64bits(), size_of_usize() == 8);
-        assert_ne!(mem_32bits(), mem_64bits());
-    }
-
-    #[test]
     fn reads_and_writes_little_endian_words() {
         let mut bytes = [0u8; 16];
-        let value = 0x1122_3344_5566_7788u64 as usize;
-        write_usize(&mut bytes, 2, value);
-        assert_eq!(read_usize(&bytes, 2), value);
+        let value = 0x1122_3344_5566_7788u64;
+        write_u64(&mut bytes, 2, value);
+        assert_eq!(read_u64(&bytes, 2), value);
         bytes[..4].copy_from_slice(&0xA1B2_C3D4u32.to_le_bytes());
         assert_eq!(read_u32(&bytes, 0), 0xA1B2_C3D4);
     }

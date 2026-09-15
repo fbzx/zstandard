@@ -1891,7 +1891,9 @@ mod tests {
             // Compaction waits until half the buffer is droppable, so it
             // settles at twice the retained history. On top of that sits
             // whatever arrived since the last drain.
-            let undrained = drain_every * 4_093 * body.len() / compressed.len();
+            // u64: the product overflows a 32-bit usize.
+            let undrained =
+                (drain_every as u64 * 4_093 * body.len() as u64 / compressed.len() as u64) as usize;
             let ceiling = 2 * (window + 1) + header.block_size_max as usize + undrained;
             assert!(
                 peak_retained <= ceiling,

@@ -1109,6 +1109,9 @@ mod tests {
     /// as much as a runtime one -- it would not build if the type still
     /// borrowed.
     #[test]
+    // wasip1 without the threads proposal cannot spawn; the `Send + Sync +
+    // 'static` half above is where the claim actually lives.
+    #[cfg_attr(target_family = "wasm", ignore = "no thread spawn on wasm")]
     fn a_shared_dictionary_is_static_and_sendable() {
         fn assert_static_send_sync<T: Send + Sync + 'static>(_: &T) {}
 

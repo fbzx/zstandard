@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Decoding and encoding were wrong on 32-bit targets, wasm32 included. The entropy bit accumulator was `usize`, and the format needs 64 bits: one sequence can spend 63 of them between reloads (a 31-bit offset code, then 16 bits of match-length extra, then 16 of literal-length extra). A 32-bit build rejected valid frames with `sequence bitstream overflow`, wrote corrupt frames of its own, and read eight bytes from a four-byte bounds check on hostile input. The accumulator is now `u64` on every target, and at default parameters the frames a 32-bit build produces are byte-identical to a 64-bit one's. Parameters that ask for a table a 32-bit address space cannot hold still narrow there (`chain_log` above 28, `ldm_hash_log` above 27, `window_log` above 30), so a frame that sets one of those explicitly finds different matches on the two widths.
+
+### Internal
+
+- CI runs the test suite on wasm32-wasip1, in debug and release. Nothing had ever executed on a 32-bit target, which is how the above shipped.
+
 ## [0.1.4] - 2026-08-31
 
 ### Changed

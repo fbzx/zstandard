@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 use crate::{
     decode_out::DecodeOut,
     entropy::{
-        bitstream::{BitCStream, BitDStreamStatus},
+        bitstream::{
+            BitCStream, BitDStreamStatus, CONTAINER_BITS, CONTAINER_BYTES, STREAM_ACCUMULATOR_MIN,
+        },
         fse, huff0,
         mem::highbit32,
     },
@@ -60,7 +62,6 @@ const OF_DEFAULT_LOG: u32 = 5;
 const ML_DEFAULT_LOG: u32 = 6;
 const COST_ACCURACY_LOG: u32 = 8;
 const FAST_SELECTOR_REPEAT_MAX_SEQUENCES: usize = 1000;
-const STREAM_ACCUMULATOR_MIN_32: u32 = 25;
 const INVERSE_PROBABILITY_LOG256: [u16; 256] = [
     0, 2048, 1792, 1642, 1536, 1453, 1386, 1329, 1280, 1236, 1197, 1162, 1130, 1100, 1073, 1047,
     1024, 1001, 980, 960, 941, 923, 906, 889, 874, 859, 844, 830, 817, 804, 791, 779, 768, 756,
@@ -917,11 +918,6 @@ pub(crate) fn decode_sequence_commands_into_stats(
         if index + 1 != section.number_of_sequences {
             fse::update_state_with_entry_fast(&mut literal_state, &mut reader, literal_entry);
             fse::update_state_with_entry_fast(&mut match_state, &mut reader, match_entry);
-            if usize::BITS < 64 {
-                if reader.reload() == BitDStreamStatus::Overflow {
-                    return Err(corruption_error("sequence bitstream overflow"));
-                }
-            }
             fse::update_state_with_entry_fast(&mut offset_state, &mut reader, offset_entry);
             if reader.reload() == BitDStreamStatus::Overflow {
                 return Err(corruption_error("sequence bitstream overflow"));
@@ -1682,38 +1678,27 @@ fn execute_block_sequences<const CHECKED: bool>(
 
         let (literal_length, match_length, offset_value) = decode_sequence!();
 
-        // FSE state updates (unconditional in this loop).
-        if usize::BITS >= 64 {
-            let ll_bits = fse::raw_entry_nb_bits(lit_raw);
-            let ml_bits = fse::raw_entry_nb_bits(ml_raw);
-            let of_bits = fse::raw_entry_nb_bits(off_raw);
-            let combined_state_bits = ll_bits + ml_bits + of_bits;
-            // Combined state bits is >= 1 for any non-degenerate FSE table,
-            // so use read_bits_fast (no zero-safe mask needed). For the
-            // all-RLE edge case (combined == 0), state_val would be 0 and
-            // new_state + 0 = new_state, which is correct.
-            let state_val = if combined_state_bits > 0 {
-                reader.read_bits_fast(combined_state_bits)
-            } else {
-                0
-            };
-            literal_state.state = fse::raw_entry_new_state(lit_raw)
-                + ((state_val >> (ml_bits + of_bits)) & ((1usize << ll_bits).wrapping_sub(1)));
-            match_state.state = fse::raw_entry_new_state(ml_raw)
-                + ((state_val >> of_bits) & ((1usize << ml_bits).wrapping_sub(1)));
-            offset_state.state = fse::raw_entry_new_state(off_raw)
-                + (state_val & ((1usize << of_bits).wrapping_sub(1)));
+        // FSE state updates (unconditional in this loop). All three fit in one
+        // read: 9 + 9 + 8 bits, against the accumulator's 57-bit floor.
+        let ll_bits = fse::raw_entry_nb_bits(lit_raw);
+        let ml_bits = fse::raw_entry_nb_bits(ml_raw);
+        let of_bits = fse::raw_entry_nb_bits(off_raw);
+        let combined_state_bits = ll_bits + ml_bits + of_bits;
+        // Combined state bits is >= 1 for any non-degenerate FSE table,
+        // so use read_bits_fast (no zero-safe mask needed). For the
+        // all-RLE edge case (combined == 0), state_val would be 0 and
+        // new_state + 0 = new_state, which is correct.
+        let state_val = if combined_state_bits > 0 {
+            reader.read_bits_fast(combined_state_bits) as usize
         } else {
-            let literal_entry = unsafe { tables.seq_ll.get_entry_unchecked(literal_state.state) };
-            let match_entry = unsafe { tables.seq_ml.get_entry_unchecked(match_state.state) };
-            let offset_entry = unsafe { tables.seq_of.get_entry_unchecked(offset_state.state) };
-            fse::update_state_with_seq_entry_fast(&mut literal_state, &mut reader, literal_entry);
-            fse::update_state_with_seq_entry_fast(&mut match_state, &mut reader, match_entry);
-            if reader.reload() == BitDStreamStatus::Overflow {
-                return Err(corruption_error("sequence bitstream overflow"));
-            }
-            fse::update_state_with_seq_entry_fast(&mut offset_state, &mut reader, offset_entry);
-        }
+            0
+        };
+        literal_state.state = fse::raw_entry_new_state(lit_raw)
+            + ((state_val >> (ml_bits + of_bits)) & ((1usize << ll_bits).wrapping_sub(1)));
+        match_state.state = fse::raw_entry_new_state(ml_raw)
+            + ((state_val >> of_bits) & ((1usize << ml_bits).wrapping_sub(1)));
+        offset_state.state =
+            fse::raw_entry_new_state(off_raw) + (state_val & ((1usize << of_bits).wrapping_sub(1)));
         lit_raw = unsafe { tables.seq_ll.get_entry_raw(literal_state.state) };
         off_raw = unsafe { tables.seq_of.get_entry_raw(offset_state.state) };
         ml_raw = unsafe { tables.seq_ml.get_entry_raw(match_state.state) };
@@ -4460,12 +4445,19 @@ fn advance_rep_state(reps: &mut RepeatOffsets, offset_value: u32, ll0: bool) {
     }
 }
 
+/// Whether an offset code is wide enough that its extra bits have to be split
+/// across two flushes, C zstd's `longOffsets`.
+///
+/// An offset code never exceeds 31 and the accumulator holds
+/// `STREAM_ACCUMULATOR_MIN` bits between flushes, so this is false today. It
+/// stays a function of the accumulator width rather than a constant because
+/// that is what it depends on: the split exists for accumulators too narrow to
+/// hold one offset, and the encoder has no other guard against that.
 fn detect_long_offsets(offset_codes: &[u8]) -> bool {
-    cfg!(target_pointer_width = "32")
-        && offset_codes
-            .iter()
-            .copied()
-            .any(|code| u32::from(code) >= STREAM_ACCUMULATOR_MIN_32)
+    offset_codes
+        .iter()
+        .copied()
+        .any(|code| u32::from(code) >= STREAM_ACCUMULATOR_MIN)
 }
 
 fn build_predefined_table_choice(part: SequencePart) -> SequenceTableChoice {
@@ -4721,7 +4713,7 @@ fn encode_sequence_bitstream_into(
         offsets,
         match_lengths,
     );
-    let byte_capacity = bit_capacity.div_ceil(8) + core::mem::size_of::<usize>() + 8;
+    let byte_capacity = bit_capacity.div_ceil(8) + CONTAINER_BYTES + 8;
     if dst.len() < byte_capacity {
         dst.resize(byte_capacity, 0);
     }
@@ -4737,11 +4729,11 @@ fn encode_sequence_bitstream_into(
         fse::init_cstate2(&mut state_offsets, offsets, last.of_code)?;
         fse::init_cstate2(&mut state_literal_lengths, literal_lengths, last.ll_code)?;
 
-        add_bits_checked(&mut stream, last.ll_extra as usize, ll_bits(last.ll_code))?;
-        add_bits_checked(&mut stream, last.ml_extra as usize, ml_bits(last.ml_code))?;
+        add_bits_checked(&mut stream, last.ll_extra.into(), ll_bits(last.ll_code))?;
+        add_bits_checked(&mut stream, last.ml_extra.into(), ml_bits(last.ml_code))?;
         add_offset_bits_checked(
             &mut stream,
-            last.of_extra as usize,
+            last.of_extra.into(),
             u32::from(last.of_code),
             long_offsets,
         )?;
@@ -4790,12 +4782,12 @@ fn encode_sequence_bitstream_into(
                         sequence.ll_code,
                     );
                 }
-                stream.add_bits_fast(sequence.ll_extra as usize, ll_bits(sequence.ll_code));
-                if stream.bit_pos + ml_nbits + of_nbits >= usize::BITS - 7 {
+                stream.add_bits_fast(sequence.ll_extra.into(), ll_bits(sequence.ll_code));
+                if stream.bit_pos + ml_nbits + of_nbits >= STREAM_ACCUMULATOR_MIN {
                     stream.flush_bits_fast();
                 }
-                stream.add_bits_fast(sequence.ml_extra as usize, ml_nbits);
-                stream.add_bits_fast(sequence.of_extra as usize, of_nbits);
+                stream.add_bits_fast(sequence.ml_extra.into(), ml_nbits);
+                stream.add_bits_fast(sequence.of_extra.into(), of_nbits);
                 stream.flush_bits_fast();
             }
         } else {
@@ -4819,17 +4811,17 @@ fn encode_sequence_bitstream_into(
 
                 add_bits_checked(
                     &mut stream,
-                    sequence.ll_extra as usize,
+                    sequence.ll_extra.into(),
                     ll_bits(sequence.ll_code),
                 )?;
                 add_bits_checked(
                     &mut stream,
-                    sequence.ml_extra as usize,
+                    sequence.ml_extra.into(),
                     ml_bits(sequence.ml_code),
                 )?;
                 add_offset_bits_checked(
                     &mut stream,
-                    sequence.of_extra as usize,
+                    sequence.of_extra.into(),
                     u32::from(sequence.of_code),
                     long_offsets,
                 )?;
@@ -4958,7 +4950,7 @@ fn encode_sequence_bitstream_direct_into(
         offsets_table,
         match_lengths_table,
     );
-    let byte_capacity = bit_capacity.div_ceil(8) + core::mem::size_of::<usize>() + 8;
+    let byte_capacity = bit_capacity.div_ceil(8) + CONTAINER_BYTES + 8;
     if dst.len() < byte_capacity {
         dst.resize(byte_capacity, 0);
     }
@@ -4987,11 +4979,11 @@ fn encode_sequence_bitstream_direct_into(
         let last_of_extra = last.offset_value - (1u32 << last_of_code);
         let last_ml_extra = last.match_length - MATCH_LENGTH_BASELINES[last_ml_code as usize];
 
-        add_bits_checked(&mut stream, last_ll_extra as usize, ll_bits(last_ll_code))?;
-        add_bits_checked(&mut stream, last_ml_extra as usize, ml_bits(last_ml_code))?;
+        add_bits_checked(&mut stream, last_ll_extra.into(), ll_bits(last_ll_code))?;
+        add_bits_checked(&mut stream, last_ml_extra.into(), ml_bits(last_ml_code))?;
         add_offset_bits_checked(
             &mut stream,
-            last_of_extra as usize,
+            last_of_extra.into(),
             u32::from(last_of_code),
             long_offsets,
         )?;
@@ -5036,12 +5028,12 @@ fn encode_sequence_bitstream_direct_into(
                     let of_extra = seq.offset_value - (1u32 << of_code);
                     let ml_extra =
                         seq.match_length - *MATCH_LENGTH_BASELINES.get_unchecked(ml_code as usize);
-                    stream.add_bits_fast(ll_extra as usize, ll_bits(ll_code));
-                    if stream.bit_pos + ml_nbits + of_nbits >= usize::BITS - 7 {
+                    stream.add_bits_fast(ll_extra.into(), ll_bits(ll_code));
+                    if stream.bit_pos + ml_nbits + of_nbits >= STREAM_ACCUMULATOR_MIN {
                         stream.flush_bits_unchecked();
                     }
-                    stream.add_bits_fast(ml_extra as usize, ml_nbits);
-                    stream.add_bits_fast(of_extra as usize, of_nbits);
+                    stream.add_bits_fast(ml_extra.into(), ml_nbits);
+                    stream.add_bits_fast(of_extra.into(), of_nbits);
                     stream.flush_bits_unchecked();
                 }
             }
@@ -5071,11 +5063,11 @@ fn encode_sequence_bitstream_direct_into(
                 let ll_extra = seq.literal_length - LITERAL_LENGTH_BASELINES[ll_code as usize];
                 let of_extra = seq.offset_value - (1u32 << of_code);
                 let ml_extra = seq.match_length - MATCH_LENGTH_BASELINES[ml_code as usize];
-                add_bits_checked(&mut stream, ll_extra as usize, ll_bits(ll_code))?;
-                add_bits_checked(&mut stream, ml_extra as usize, ml_bits(ml_code))?;
+                add_bits_checked(&mut stream, ll_extra.into(), ll_bits(ll_code))?;
+                add_bits_checked(&mut stream, ml_extra.into(), ml_bits(ml_code))?;
                 add_offset_bits_checked(
                     &mut stream,
-                    of_extra as usize,
+                    of_extra.into(),
                     u32::from(of_code),
                     long_offsets,
                 )?;
@@ -5155,18 +5147,18 @@ pub(crate) fn ml_bits(code: u8) -> u32 {
 }
 
 fn ensure_bits_capacity(bit_c: &mut BitCStream<'_>, nb_bits: u32) -> Result<()> {
-    if nb_bits >= usize::BITS {
+    if nb_bits >= CONTAINER_BITS {
         return Err(Error::InvalidParameter(
-            "bitstream write exceeds the machine word size",
+            "bitstream write exceeds the accumulator width",
         ));
     }
-    if bit_c.bit_pos + nb_bits >= usize::BITS - 7 {
+    if bit_c.bit_pos + nb_bits >= STREAM_ACCUMULATOR_MIN {
         bit_c.flush_bits();
     }
     Ok(())
 }
 
-fn add_bits_checked(bit_c: &mut BitCStream<'_>, value: usize, nb_bits: u32) -> Result<()> {
+fn add_bits_checked(bit_c: &mut BitCStream<'_>, value: u64, nb_bits: u32) -> Result<()> {
     if nb_bits == 0 {
         return Ok(());
     }
@@ -5177,15 +5169,15 @@ fn add_bits_checked(bit_c: &mut BitCStream<'_>, value: usize, nb_bits: u32) -> R
 
 fn add_offset_bits_checked(
     bit_c: &mut BitCStream<'_>,
-    value: usize,
+    value: u64,
     nb_bits: u32,
     long_offsets: bool,
 ) -> Result<()> {
-    if !long_offsets || nb_bits < STREAM_ACCUMULATOR_MIN_32 {
+    if !long_offsets || nb_bits < STREAM_ACCUMULATOR_MIN {
         return add_bits_checked(bit_c, value, nb_bits);
     }
 
-    let extra_bits = nb_bits - (STREAM_ACCUMULATOR_MIN_32 - 1);
+    let extra_bits = nb_bits - (STREAM_ACCUMULATOR_MIN - 1);
     if extra_bits != 0 {
         add_bits_checked(bit_c, value, extra_bits)?;
         bit_c.flush_bits();
@@ -6157,12 +6149,55 @@ mod tests {
         assert_eq!(decoded, expected);
     }
 
-    fn encode_reverse_bits(values: &[(usize, u32)]) -> Vec<u8> {
+    /// A body whose repeats sit far enough apart that matching them needs wide
+    /// offset codes.
+    ///
+    /// Three copies of one pseudo-random block separated by long runs of a
+    /// single byte. The runs cost almost nothing to encode and push each copy
+    /// hundreds of kilobytes from the last, which is the only way to make the
+    /// encoder reach for an offset code near the top of the range.
+    fn distant_repeat_body() -> Vec<u8> {
+        const BLOCK: usize = 4096;
+        let block: Vec<u8> = (0..BLOCK)
+            .map(|i| ((i as u32).wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
+
+        let mut body = Vec::with_capacity(BLOCK * 3 + 500_000);
+        body.extend_from_slice(&block);
+        body.extend(core::iter::repeat_n(0u8, 300_000));
+        body.extend_from_slice(&block);
+        body.extend(core::iter::repeat_n(7u8, 200_000));
+        body.extend_from_slice(&block);
+        body
+    }
+
+    /// One sequence can spend 63 bits of the accumulator between reloads: an
+    /// offset code of up to 31 bits, then 16 of match-length extra, then 16 of
+    /// literal-length extra. While the accumulator was the machine word, a
+    /// 32-bit target overflowed on the reload and rejected the frame.
+    #[test]
+    fn a_frame_with_distant_repeats_round_trips() {
+        let body = distant_repeat_body();
+        let frame = crate::encode_all(&body).unwrap();
+
+        // The guard that keeps this test covering wide offsets: the body holds
+        // 4 KiB of unique content, so a frame this small can only have come
+        // from matching the two distant copies rather than re-encoding them.
+        assert!(
+            frame.len() < 8 * 1024,
+            "expected the distant copies to be matched, got a {}-byte frame",
+            frame.len()
+        );
+
+        assert_eq!(decode_all(&frame).unwrap(), body);
+    }
+
+    fn encode_reverse_bits(values: &[(u64, u32)]) -> Vec<u8> {
         let mut bytes = vec![0u8; 64];
         let written = {
             let mut stream = BitCStream::new(&mut bytes).unwrap();
             for &(value, nb_bits) in values {
-                if stream.bit_pos + nb_bits >= usize::BITS - 7 {
+                if stream.bit_pos + nb_bits >= STREAM_ACCUMULATOR_MIN {
                     stream.flush_bits();
                 }
                 stream.add_bits(value, nb_bits);

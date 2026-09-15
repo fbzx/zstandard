@@ -824,11 +824,11 @@ fn the_damaged_dictionary_generator_still_produces_parseable_dictionaries() {
     for _ in 0..total {
         let mut bytes = valid.to_vec();
         for _ in 0..1 + (next() % 4) as usize {
-            let at = 8 + next() as usize % (table_region - 8);
+            let at = 8 + (next() % (table_region - 8) as u64) as usize;
             bytes[at] ^= (next() & 0xff) as u8;
         }
         if next() % 2 == 0 {
-            let cut = 8 + next() as usize % (valid.len() - 8);
+            let cut = 8 + (next() % (valid.len() - 8) as u64) as usize;
             bytes.truncate(cut);
         }
         if EncoderDictionary::new(&bytes).is_ok() {
