@@ -14,6 +14,13 @@ name: Miri
 # six of the first batch had been in the tree for a long time, passing the whole
 # suite. This is a sweep for what has accumulated, not a gate on a change.
 #
+# There are two legs. The first interprets `tests/miri.rs` on the host, which
+# is 64-bit and is where nearly all of the coverage is. The second interprets a
+# handful of unit tests for a 32-bit target, because the unsafe code in the
+# entropy layer is the one part of this crate whose bounds arithmetic depends
+# on the width of a pointer; the comment on that job says why the wasm32 leg of
+# the ordinary CI run does not cover the same ground.
+#
 # Run it directly on anything that touches `unsafe` rather than waiting for
 # Sunday — `gh workflow run miri.yml`, or the Actions tab.
 
@@ -65,3 +72,55 @@ jobs:
       # btultra, while the levels are the coverage.
       - name: cargo miri test
         run: cargo miri test --test miri -- --test-threads=1
+
+  miri-32-bit:
+    name: miri (undefined behavior, 32-bit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust nightly with Miri
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          targets: i686-unknown-linux-gnu
+          components: miri
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: miri-i686
+
+      # Why a 32-bit leg at all: the bit container, the unaligned word helpers
+      # it loads through, and the pointer arithmetic that walks the bitstream
+      # backwards are the only code here whose bounds depend on the width of a
+      # pointer. When the container was `usize` rather than `u64`, a 32-bit
+      # build read eight bytes after a four-byte bounds check and flushed eight
+      # where four were reserved. Both are memory unsafety, and both were
+      # invisible to every job in this repository, because the job above runs on
+      # the host and the host is 64-bit.
+      #
+      # Why the wasm32 job in `ci.yml` is not a substitute: wasm32 bounds-checks
+      # the module's linear memory, not the allocation. A read or write a few
+      # bytes past a `Vec` lands in whatever else the allocator has placed
+      # there, so it returns the wrong bytes or corrupts a neighbour rather than
+      # faulting. Wasmtime proves the 32-bit paths run and agree with the
+      # 64-bit ones; it cannot see the defect that made them wrong. Only the
+      # `debug_assert!`s in `src/entropy/bitstream.rs` and this job can.
+      #
+      # Why a filter rather than `--lib`: cost. These fourteen tests take about
+      # four seconds under the interpreter, so what this job spends is Miri's
+      # sysroot build for the target and not the testing. The rest of the unit
+      # tests are minutes apiece — `entropy::huff0` takes nine, and
+      # `entropy::hist` had not finished after ten — and none of them are
+      # width-sensitive, so their coverage does not pay for the wall clock.
+      # Widen the filter when a module grows unsafe code whose bounds are a
+      # function of `usize::BITS`. Do not widen it to `--lib`, and do not
+      # interpret `tests/miri.rs` a second time for a second target: that is the
+      # twenty minutes the job above already spends.
+      #
+      # Folded rather than a plain scalar because a filter ending in `::` puts a
+      # colon before a space, which YAML reads as the start of a mapping.
+      - name: cargo miri test (i686)
+        run: >-
+          cargo miri test --target i686-unknown-linux-gnu --lib --
+          --test-threads=1 entropy::bitstream:: entropy::mem:: entropy::fse::

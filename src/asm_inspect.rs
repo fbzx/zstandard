@@ -44,7 +44,7 @@ use crate::entropy::fse::{DState, SequenceDecodeEntry};
 /// +2-3 insns (extra shift + sub + and for the zero-safe mask).
 #[inline(never)]
 #[unsafe(no_mangle)]
-pub extern "C" fn asm_read_bits_fast_zero_safe(stream: &mut BitDStream, nb_bits: u32) -> usize {
+pub extern "C" fn asm_read_bits_fast_zero_safe(stream: &mut BitDStream, nb_bits: u32) -> u64 {
     stream.read_bits_fast_zero_safe(nb_bits)
 }
 
@@ -52,14 +52,14 @@ pub extern "C" fn asm_read_bits_fast_zero_safe(stream: &mut BitDStream, nb_bits:
 /// Should produce identical instruction count to C.
 #[inline(never)]
 #[unsafe(no_mangle)]
-pub extern "C" fn asm_read_bits_fast(stream: &mut BitDStream, nb_bits: u32) -> usize {
+pub extern "C" fn asm_read_bits_fast(stream: &mut BitDStream, nb_bits: u32) -> u64 {
     stream.read_bits_fast(nb_bits)
 }
 
 /// Rust's look_bits_fast (no skip, matches C BIT_lookBitsFast).
 #[inline(never)]
 #[unsafe(no_mangle)]
-pub extern "C" fn asm_look_bits_fast(stream: &BitDStream, nb_bits: u32) -> usize {
+pub extern "C" fn asm_look_bits_fast(stream: &BitDStream, nb_bits: u32) -> u64 {
     stream.look_bits_fast(nb_bits)
 }
 

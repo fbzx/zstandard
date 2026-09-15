@@ -3561,7 +3561,7 @@ fn amplifying_frame_without_content_size() -> (Vec<u8>, Vec<u8>) {
     while data.len() < 1_000_000 {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
         let run = 40 + (seed >> 33) as usize % 200;
-        let ch = alphabet[(seed >> 17) as usize % alphabet.len()];
+        let ch = alphabet[((seed >> 17) % alphabet.len() as u64) as usize];
         data.extend(std::iter::repeat_n(ch, run));
         data.extend_from_slice(b"the quick brown fox jumps over the lazy dog ");
     }
@@ -3943,7 +3943,7 @@ fn corrupt_frames_are_not_excused_as_cap_violations() {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
         let run = 30 + (seed >> 33) as usize % 120;
         payload.extend(std::iter::repeat_n(
-            alphabet[(seed >> 17) as usize % alphabet.len()],
+            alphabet[((seed >> 17) % alphabet.len() as u64) as usize],
             run,
         ));
         payload.extend_from_slice(b"pack my box with five dozen liquor jugs ");

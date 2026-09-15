@@ -15,12 +15,12 @@ mod benchmark_corpora;
 mod upstream_trace_helper;
 
 use zstandard::{
-    BlockTraceDictionaryMode, BlockTraceDictionaryTableSource, BlockTraceEmittedMatchKind,
-    BlockTraceMatchSource, BlockTraceParserStrategy, BlockTraceUpstreamStrategy, BlockType,
-    CompressionLevel, DecoderDictionary, DecoderOptions, Encoder, EncoderDictionary,
-    EncoderOptions, Error, Format, FrameHeader, LiteralCompressionMode, ParameterOverrides,
-    RowMatchFinderMode, Strategy, StreamingDecoder, StreamingEncoder, decode_all,
-    decode_all_with_dict, decode_all_with_prepared_dict, encode_all_with_dict,
+    BLOCK_SIZE_MAX, BlockHeader, BlockTraceDictionaryMode, BlockTraceDictionaryTableSource,
+    BlockTraceEmittedMatchKind, BlockTraceMatchSource, BlockTraceParserStrategy,
+    BlockTraceUpstreamStrategy, BlockType, CompressionLevel, DecoderDictionary, DecoderOptions,
+    Encoder, EncoderDictionary, EncoderOptions, Error, Format, FrameHeader, LiteralCompressionMode,
+    ParameterOverrides, RowMatchFinderMode, Strategy, StreamingDecoder, StreamingEncoder,
+    decode_all, decode_all_with_dict, decode_all_with_prepared_dict, encode_all_with_dict,
     encode_all_with_dict_and_options, encode_all_with_options, encode_all_with_prepared_dict,
     encode_all_with_prepared_dict_and_options, parse_block_header, parse_frame_header,
     trace_first_block_with_prepared_dict_and_options,
@@ -3272,6 +3272,163 @@ fn fast_one_shot_stays_at_upstream_size_past_16_mib() {
             ours <= theirs,
             "level {level}: Rust {ours} bytes, upstream {theirs} bytes"
         );
+    }
+}
+
+/// A stream that pledges its size produces the frame upstream's streaming
+/// encoder produces under the same pledge, byte for byte, down to a frame
+/// whose content is exactly one block, and wherever the two one-shot encoders
+/// already agree.
+///
+/// The single-block case is the one that had drifted. Our buffer filled on the
+/// last pledged byte and the block went out unflagged, followed by an empty
+/// last block from `finish`. Upstream sets its buffer target one byte past the
+/// block size when the pledge equals it (`ZSTD_CCtx_init_compressStream2`,
+/// `zstd_compress.c`), so its only block waits for `ZSTD_e_end` and carries
+/// the flag itself. `compress_streaming_once` cannot observe this because it
+/// never pledges; the advanced streaming mode can.
+///
+/// Three claims, checked separately so a failure names its side: our pledged
+/// stream is our one-shot frame; upstream's pledged stream is upstream's
+/// one-shot frame; and where the one-shot frames agree, so do the streams.
+/// They do not agree on the 539-byte input at levels 9 and 19, where our
+/// one-shot parser is one byte over upstream's, which is a parse tie of the
+/// kind `KNOWN_UPSTREAM_SIZE_GAPS` records and nothing the stream adds.
+///
+/// Level 19 is left out above one block for the reason
+/// `streaming_block_layout_matches_upstream_streaming` gives: the optimal
+/// parsers split a block where upstream does not, a separate and chosen
+/// deviation. A single block has nothing to split.
+#[test]
+fn a_pledged_stream_matches_upstream_streaming_under_the_same_pledge() {
+    let Some(helper) = upstream_trace_helper::helper_path() else {
+        return;
+    };
+    const PIECE: usize = 32 * 1024;
+    let single_block: &[usize] = &[1, 539, 4096, 36_827, 128 * 1024];
+    let multi_block: &[usize] = &[128 * 1024 + 1, 300 * 1024];
+
+    for (sizes, levels) in [
+        (single_block, &[1, 3, 9, 19][..]),
+        (multi_block, &[1, 3, 9][..]),
+    ] {
+        for &size in sizes {
+            let input = build_pattern(size);
+            for &level in levels {
+                let options = EncoderOptions {
+                    compression_level: CompressionLevel::try_new(level).unwrap(),
+                    pledged_src_size: Some(size as u64),
+                    ..Default::default()
+                };
+                let settings = [
+                    format!("compressionLevel={level}"),
+                    format!("pledgedSrcSize={size}"),
+                ];
+                let ours = stream_encode(&input, options, PIECE);
+                let ours_one_shot = encode_all_with_options(&input, options).unwrap();
+                let theirs = upstream_trace_helper::compress_advanced_streaming(
+                    helper,
+                    upstream_trace_helper::DICT_NONE,
+                    PIECE,
+                    &settings,
+                    &input,
+                );
+                let theirs_one_shot = upstream_trace_helper::compress_advanced(
+                    helper,
+                    upstream_trace_helper::DICT_NONE,
+                    &settings[..1],
+                    &input,
+                );
+
+                assert_eq!(decode_all(&ours).unwrap(), input);
+                assert_eq!(
+                    ours, ours_one_shot,
+                    "{size} bytes at level {level}: our pledged stream differs from our one-shot frame"
+                );
+                assert_eq!(
+                    theirs, theirs_one_shot,
+                    "{size} bytes at level {level}: upstream's pledged stream differs from its one-shot frame"
+                );
+                if ours_one_shot == theirs_one_shot {
+                    assert_eq!(
+                        ours, theirs,
+                        "{size} bytes at level {level}: pledged streaming frame differs from upstream's"
+                    );
+                } else {
+                    assert!(
+                        size == 539 && (level == 9 || level == 19),
+                        "{size} bytes at level {level}: one-shot frames differ from upstream's, {} against {} bytes",
+                        ours_one_shot.len(),
+                        theirs_one_shot.len(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A pledged stream whose content is an exact multiple of the block size and
+/// longer than one block still closes its frame with the epilogue's empty last
+/// block -- and so does upstream, which is why the frames still match.
+///
+/// This is the boundary of what `push_target` fixes, and it is worth pinning
+/// from both sides. Upstream's bump is `blockSizeMax + (blockSizeMax ==
+/// pledgedSrcSize)`, an equality and not a divisibility test, so at two or
+/// three whole blocks it does not fire: the last full block goes out from the
+/// streaming loop unflagged and `ZSTD_writeEpilogue` spends three bytes on an
+/// empty block to carry the flag. Widening our own bump to every multiple
+/// would save those three bytes and would diverge from upstream on every
+/// block-aligned frame, which is the trade this test refuses on the record.
+///
+/// The assertion is structural rather than a byte count: both streams end in a
+/// last block that is raw and empty. The size gap that follows from it is three
+/// bytes against each side's own one-shot frame, which is what the comment on
+/// `StreamingEncoder::finish` describes.
+#[test]
+fn a_pledged_stream_of_whole_blocks_carries_the_epilogue_like_upstream() {
+    let Some(helper) = upstream_trace_helper::helper_path() else {
+        return;
+    };
+    const PIECE: usize = 32 * 1024;
+
+    for size in [2 * BLOCK_SIZE_MAX, 3 * BLOCK_SIZE_MAX] {
+        let input = build_pattern(size);
+        for level in [1, 3, 9] {
+            let options = EncoderOptions {
+                compression_level: CompressionLevel::try_new(level).unwrap(),
+                pledged_src_size: Some(size as u64),
+                ..Default::default()
+            };
+            let settings = [
+                format!("compressionLevel={level}"),
+                format!("pledgedSrcSize={size}"),
+            ];
+            let ours = stream_encode(&input, options, PIECE);
+            let theirs = upstream_trace_helper::compress_advanced_streaming(
+                helper,
+                upstream_trace_helper::DICT_NONE,
+                PIECE,
+                &settings,
+                &input,
+            );
+
+            assert_eq!(decode_all(&ours).unwrap(), input);
+            for (whose, frame) in [("ours", &ours), ("upstream's", &theirs)] {
+                let epilogue = parse_block_header(&frame[frame.len() - BlockHeader::SIZE..])
+                    .expect("a frame ends on a block header");
+                assert!(
+                    epilogue.last_block
+                        && epilogue.block_type == BlockType::Raw
+                        && epilogue.block_size == 0,
+                    "{size} bytes at level {level}: {whose} stream did not end on the \
+                     epilogue's empty last block, but on {epilogue:?}"
+                );
+            }
+            assert_eq!(
+                ours, theirs,
+                "{size} bytes at level {level}: pledged streaming frame differs from upstream's"
+            );
+        }
     }
 }
 

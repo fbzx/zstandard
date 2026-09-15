@@ -19,6 +19,23 @@ pub(crate) const MAX_MATCH_HASH_BITS: u32 = 25;
 /// bound is kept for the 32-bit hash; entry positions are independent of it.
 pub(crate) const MAX_TAGGED_MATCH_HASH_BITS: u32 = 32 - SHORT_CACHE_TAG_BITS;
 
+/// The widest `1 << log` table of `entry_bytes`-byte entries this target can
+/// hold.
+///
+/// A `Vec` longer than `isize::MAX` bytes is not a failed allocation but a
+/// `capacity overflow` panic, which under `panic = "abort"` takes the process
+/// down; a caller-supplied parameter must not be able to do that. The bound
+/// binds on 32-bit targets only, where `ParameterOverrides::CHAIN_LOG` and
+/// `ParameterOverrides::LDM_HASH_LOG` both admit logs past it. Upstream has a
+/// target-dependent bound of its own here, `ZSTD_CHAINLOG_MAX_32`.
+pub(crate) const fn max_table_log(entry_bytes: usize) -> u32 {
+    (usize::BITS - 2) - entry_bytes.ilog2()
+}
+
+/// [`max_table_log`] for a binary tree's `children`, which holds two `u32`s
+/// per cycle slot.
+pub(crate) const MAX_BINARY_TREE_CYCLE_LOG: u32 = max_table_log(2 * size_of::<u32>());
+
 /// The hash width a finder will actually build for a requested `hash_log`.
 pub(crate) const fn match_hash_bits(requested: u32) -> u32 {
     if requested < 10 {
@@ -547,8 +564,17 @@ pub(crate) fn chain_cycle_log(chain_log: u32) -> u32 {
 /// One below the chain log, which is C's `ZSTD_cycleLog` (`zstd_compress.c:1441`)
 /// for every strategy from `btlazy2` up: the tree stores two children per
 /// position, so it holds half as many positions as the chain would.
+///
+/// Narrowed to [`MAX_BINARY_TREE_CYCLE_LOG`] on a target that cannot address
+/// the whole of it. The narrowing belongs here rather than in
+/// [`BinaryTreeFinder::new`] because
+/// [`MatchFinderParameters::rebase_period`] reads the same function: the
+/// streaming encoder aligns its compaction to the cycle the tree is indexed
+/// by, and the two must name the same length.
 pub(crate) fn binary_tree_cycle_log(chain_log: u32) -> u32 {
-    chain_log.saturating_sub(1).max(1)
+    chain_log
+        .saturating_sub(1)
+        .clamp(1, MAX_BINARY_TREE_CYCLE_LOG)
 }
 
 impl MatchFinderParameters {
@@ -3170,7 +3196,7 @@ pub(crate) fn count_match_length_slices(left: &[u8], right: &[u8]) -> usize {
         let mut matched = left_words.len() * 4;
         while matched < max_len
             && left_tail[matched - left_words.len() * 4]
-                == right_tail[matched - right_words.len() * 4]
+                == right_tail[matched - left_words.len() * 4]
         {
             matched += 1;
         }

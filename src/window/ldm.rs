@@ -39,6 +39,7 @@
 #![allow(dead_code)]
 
 use crate::encode::UpstreamStrategy;
+use crate::window::max_table_log;
 
 /// `ZSTD_LDM_DEFAULT_WINDOW_LOG` (`zstd_ldm.h:21`), which is
 /// `ZSTD_WINDOWLOG_LIMIT_DEFAULT`.
@@ -511,12 +512,27 @@ pub(crate) struct LdmTable {
     hash_bits: u32,
 }
 
+/// Widest `hash_log` this target can hold a table for; see [`max_table_log`].
+const MAX_HASH_LOG: u32 = max_table_log(size_of::<LdmEntry>());
+
 impl LdmTable {
+    /// The `(hash_log, bucket_size_log)` a table is actually built with.
+    ///
+    /// `ldm_hash_log` reaches 30, whose table a 32-bit target cannot address,
+    /// so it narrows to [`MAX_HASH_LOG`]. That happens here rather than in
+    /// [`LdmParameters::resolve`], which stays a statement-by-statement port of
+    /// C: the matcher reads the table's own `hash_bits` and `bucket_size_log`,
+    /// never `params.hash_log`.
+    fn geometry(params: LdmParameters) -> (u32, u32) {
+        let hash_log = params.hash_log.min(MAX_HASH_LOG);
+        (hash_log, params.bucket_size_log.min(hash_log))
+    }
+
     pub(crate) fn new(params: LdmParameters) -> Self {
-        let bucket_size_log = params.bucket_size_log.min(params.hash_log);
-        let hash_bits = params.hash_log - bucket_size_log;
+        let (hash_log, bucket_size_log) = Self::geometry(params);
+        let hash_bits = hash_log - bucket_size_log;
         Self {
-            entries: vec![LdmEntry::default(); 1usize << params.hash_log],
+            entries: vec![LdmEntry::default(); 1usize << hash_log],
             bucket_cursors: vec![0u8; 1usize << hash_bits],
             bucket_size_log,
             hash_bits,
@@ -1020,6 +1036,63 @@ impl LdmState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An `entries` past `isize::MAX` bytes is a `capacity overflow` panic
+    /// rather than a refused allocation, and `panic = "abort"` makes that
+    /// unrecoverable. At eight bytes an entry, `ldm_hash_log` 28 and up reach
+    /// it on a 32-bit target, one log earlier than the binary tree does.
+    ///
+    /// `bucket_size_log` has to follow the narrowed log rather than the
+    /// requested one: [`LdmTable::bucket`] indexes `entries` by
+    /// `hash << bucket_size_log` over `hash_bits` bits of hash.
+    #[test]
+    fn no_ldm_hash_log_in_range_asks_for_a_table_past_the_address_space() {
+        // `ParameterOverrides::LDM_HASH_LOG`, which `validate` accepts in full
+        // on every target.
+        for hash_log in 6..=30u32 {
+            let (built, bucket_size_log) = LdmTable::geometry(LdmParameters {
+                window_log: 27,
+                hash_log,
+                min_match_length: 64,
+                bucket_size_log: 3,
+                hash_rate_log: 0,
+            });
+            assert_eq!(built, hash_log.min(MAX_HASH_LOG));
+            assert!(bucket_size_log <= built);
+            let bytes = (1usize << built).checked_mul(size_of::<LdmEntry>());
+            assert!(
+                bytes.is_some_and(|bytes| bytes <= isize::MAX as usize),
+                "ldm_hash_log {hash_log} sizes the table past isize::MAX"
+            );
+        }
+    }
+
+    /// `ldm_hash_log` 28 used to abort the process on a 32-bit target. Nothing
+    /// narrows it on the way in -- `adjust_upstream_cparams` reaches the
+    /// parser's chain log, not this one -- so even one-shot reached it.
+    ///
+    /// 32-bit only, because that is where the abort was: [`MAX_HASH_LOG`] is 59
+    /// where `usize` is 64 bits, so `ldm_hash_log` 28 is an ordinary parameter
+    /// there and the encode proves nothing about the narrowing while still
+    /// building two gibibytes of `entries`. The `wasm32-wasip1` leg of CI runs
+    /// the suite on a genuine 32-bit `usize`, which is where this one has to
+    /// pass.
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn a_wide_ldm_hash_log_encodes_instead_of_aborting() {
+        let options = crate::EncoderOptions {
+            compression_level: crate::CompressionLevel::try_new(3).unwrap(),
+            parameters: crate::ParameterOverrides {
+                long_distance_matching: LdmMode::Enabled,
+                ldm_hash_log: Some(28),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let input = b"a wide ldm hash log encodes a wide ldm hash log encodes";
+        let encoded = crate::encode_all_with_options(input, options).unwrap();
+        assert_eq!(crate::decode_all(&encoded).unwrap(), input);
+    }
 
     /// `7 - strategy / 3` over C's 1-based codes, which is not the same curve
     /// as `7 - ordinal / 3` over 0-based ones: at `Greedy` (code 3) C gives 6

@@ -2798,6 +2798,8 @@ fn the_prefix_table_is_built_exactly_when_a_parse_reads_it() {
 /// [`the_prefix_table_is_built_exactly_when_a_parse_reads_it`] holds gets a
 /// panic, not a frame parsed against tables nobody filled.
 #[test]
+// `catch_unwind` needs unwinding, which wasm targets do not have.
+#[cfg_attr(target_family = "wasm", ignore = "panic = abort on wasm")]
 fn a_dict_match_state_parse_without_prepared_tables_says_so() {
     let prefix = b"abcdefghABCDEFGHabcdefghABCDEFGH";
     let src = b"abcdefghABCDEFGHEFGHEFGHTAILTAIL";

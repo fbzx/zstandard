@@ -262,3 +262,38 @@ fn dictionary_roundtrip_through_the_adapters() {
         payload
     );
 }
+
+/// A `Writer` that pledges a size of one block or less writes the frame the
+/// one-shot encoder writes, whatever it is handed and however it is chunked.
+///
+/// `Writer` owns a `StreamingEncoder` and forwards to its `push` and `finish`,
+/// so it inherits `push_target` holding the only block back for `finish` to
+/// flag. That is worth a test of its own because it is the form most callers
+/// reach for -- `pledged_src_size` is usually known when the payload is a file
+/// or an in-memory buffer -- and because `Writer::finish` must reach the
+/// encoder's `finish` without a `flush` in between, which would send the block
+/// early and put the empty last block back.
+#[test]
+fn a_pledged_writer_of_one_block_matches_one_shot() {
+    for size in [1usize, 4096, 128 * 1024] {
+        let payload = corpus(size);
+        let options = EncoderOptions {
+            compression_level: CompressionLevel::try_new(9).unwrap(),
+            pledged_src_size: Some(size as u64),
+            ..Default::default()
+        };
+        let one_shot = zstandard::encode_all_with_options(&payload, options).unwrap();
+
+        for chunk in [size, 1000] {
+            let mut writer = Writer::with_options(Vec::new(), options).unwrap();
+            for piece in payload.chunks(chunk.max(1)) {
+                writer.write_all(piece).unwrap();
+            }
+            let compressed = writer.finish().unwrap();
+            assert_eq!(
+                compressed, one_shot,
+                "{size} bytes written {chunk} at a time: Writer's frame differs from one-shot"
+            );
+        }
+    }
+}

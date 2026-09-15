@@ -15,7 +15,7 @@ use zstandard::{
     CompressionLevel, DecoderDictionary, DecoderOptions, EncoderDictionary, EncoderOptions, Format,
     FrameHeader, ParameterOverrides, StreamingDecoder, StreamingEncoder, decode_all,
     decode_all_with_dict, decode_all_with_options, encode_all_with_dict_and_options,
-    encode_all_with_options, parse_frame_header,
+    encode_all_with_options, parse_block_header, parse_frame_header,
 };
 
 const MAX_INPUT_BYTES: usize = 16 * 1024;
@@ -710,6 +710,68 @@ fn streaming_matches_one_shot_on_a_period_that_straddles_the_block_size() {
     }
 }
 
+/// A stream that pledges exactly one block of content produces the frame the
+/// one-shot encoder produces for the same bytes and options, however the
+/// content is pushed, and that frame's only block carries the last-block flag.
+///
+/// Before `push_target` a full buffer was encoded as soon as it filled, and a
+/// pledge equal to the block size made the only block fill on the last pledged
+/// byte: it went out unflagged and `finish` closed the frame with an empty last
+/// block, three bytes the one-shot encoder never spends on the same input.
+/// Upstream sidesteps the same trap by setting its buffer target one byte past
+/// the block size when the pledge equals it (`ZSTD_CCtx_init_compressStream2`,
+/// `zstd_compress.c`), so its only block waits for `ZSTD_e_end` and carries
+/// the flag itself.
+///
+/// 128 KiB is the largest single block, and at that size the window is clamped
+/// to the content, so block, window and pledge all coincide there. A pledge
+/// that is exceeded still fills the held-back buffer and is still refused.
+#[test]
+fn a_pledged_single_block_stream_matches_one_shot() {
+    for size in [1usize, 539, 4096, 36_827, 128 * 1024] {
+        let input: Vec<u8> = (0..size)
+            .map(|index| b"the quick brown fox "[index % 20].wrapping_add((index / 4096) as u8))
+            .collect();
+        for level in [1, 3, 9, 19] {
+            let options = EncoderOptions {
+                compression_level: CompressionLevel::try_new(level).unwrap(),
+                pledged_src_size: Some(size as u64),
+                ..Default::default()
+            };
+            let one_shot = encode_all_with_options(&input, options).unwrap();
+            let FrameHeader::Zstandard(header) = parse_frame_header(&one_shot).unwrap() else {
+                panic!("expected a Zstandard frame");
+            };
+            assert!(
+                parse_block_header(&one_shot[header.header_size..])
+                    .unwrap()
+                    .last_block,
+                "{size} bytes at level {level}: one-shot did not flag its only block"
+            );
+            // Whole, in pieces that never fill the buffer, and byte by byte for
+            // the sizes where that stays quick.
+            for piece in [size, 1000, 1] {
+                if piece == 1 && size > 4096 {
+                    continue;
+                }
+                let streamed = stream_encode(&input, options, piece);
+                assert_eq!(
+                    streamed, one_shot,
+                    "{size} bytes at level {level}, pushed {piece} at a time: streamed frame differs from one-shot"
+                );
+            }
+        }
+    }
+
+    let mut encoder = StreamingEncoder::new(EncoderOptions {
+        pledged_src_size: Some(4096),
+        ..Default::default()
+    })
+    .unwrap();
+    encoder.push(&[0x5a; 4097]).unwrap();
+    assert!(encoder.finish().is_err());
+}
+
 /// A real trained dictionary, trained once and shared by every case.
 ///
 /// Training per case would dominate the runtime, and the bytes do not need to
@@ -824,11 +886,11 @@ fn the_damaged_dictionary_generator_still_produces_parseable_dictionaries() {
     for _ in 0..total {
         let mut bytes = valid.to_vec();
         for _ in 0..1 + (next() % 4) as usize {
-            let at = 8 + next() as usize % (table_region - 8);
+            let at = 8 + (next() % (table_region - 8) as u64) as usize;
             bytes[at] ^= (next() & 0xff) as u8;
         }
         if next() % 2 == 0 {
-            let cut = 8 + next() as usize % (valid.len() - 8);
+            let cut = 8 + (next() % (valid.len() - 8) as u64) as usize;
             bytes.truncate(cut);
         }
         if EncoderDictionary::new(&bytes).is_ok() {

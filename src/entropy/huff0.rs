@@ -2,10 +2,10 @@ use core::cmp;
 
 use crate::{
     entropy::{
-        bitstream::{BitCStream, BitDStream, BitDStreamStatus},
+        bitstream::{BitCStream, BitDStream, BitDStreamStatus, CONTAINER_BITS, CONTAINER_BYTES},
         fse,
         hist::{HIST_WKSP_SIZE_U32, count_simple, count_wksp},
-        mem::{highbit32, mem_32bits, mem_64bits, size_of_usize},
+        mem::highbit32,
     },
     error::{Error, Result},
 };
@@ -377,7 +377,7 @@ pub(crate) fn read_ctable_x1_with_repeat_validity(
 #[allow(unsafe_code)]
 #[inline(always)]
 fn decode_symbol_x1(bit_d: &mut BitDStream, table: &[DEltX1], table_log: u32) -> u8 {
-    let value = bit_d.look_bits_fast(table_log);
+    let value = bit_d.look_bits_fast(table_log) as usize;
     // Safety: value = look_bits_fast(table_log) returns at most (1 << table_log) - 1.
     // `table` is a `DTableX1::entries`, which has DTABLE_X1_SIZE = 1 << TABLELOG_MAX
     // entries, and `read_dtable_x1` refuses to populate a table whose table_log
@@ -399,24 +399,14 @@ fn decode_stream_x1(
     // Safety for all get_unchecked_mut: the caller guarantees end <= dst.len(),
     // and pos < end is checked by each loop condition before writing.
     while bit_d.reload() == BitDStreamStatus::Unfinished && pos < end.saturating_sub(3) {
-        if mem_64bits() {
-            unsafe { *dst.get_unchecked_mut(pos) = decode_symbol_x1(bit_d, table, table_log) };
-            pos += 1;
-        }
         unsafe { *dst.get_unchecked_mut(pos) = decode_symbol_x1(bit_d, table, table_log) };
         pos += 1;
-        if mem_64bits() {
-            unsafe { *dst.get_unchecked_mut(pos) = decode_symbol_x1(bit_d, table, table_log) };
-            pos += 1;
-        }
         unsafe { *dst.get_unchecked_mut(pos) = decode_symbol_x1(bit_d, table, table_log) };
         pos += 1;
-    }
-    if mem_32bits() {
-        while bit_d.reload() == BitDStreamStatus::Unfinished && pos < end {
-            unsafe { *dst.get_unchecked_mut(pos) = decode_symbol_x1(bit_d, table, table_log) };
-            pos += 1;
-        }
+        unsafe { *dst.get_unchecked_mut(pos) = decode_symbol_x1(bit_d, table, table_log) };
+        pos += 1;
+        unsafe { *dst.get_unchecked_mut(pos) = decode_symbol_x1(bit_d, table, table_log) };
+        pos += 1;
     }
     while pos < end {
         unsafe { *dst.get_unchecked_mut(pos) = decode_symbol_x1(bit_d, table, table_log) };
@@ -491,32 +481,26 @@ fn decompress_4x1_using_dtable(dst: &mut [u8], src: &[u8], dtable: &DTableX1) ->
 
     // Safety for all get_unchecked_mut below: op4 < olimit = dst.len() - 3,
     // and op1 <= op2 <= op3 <= op4, so all indices are within bounds.
-    // On 64-bit, 4 symbols are decoded per stream per outer iteration (16 total),
-    // and the loop guard ensures 4 bytes of headroom.
+    // 4 symbols are decoded per stream per outer iteration (16 total), and the
+    // loop guard ensures 4 bytes of headroom.
     #[allow(unsafe_code)]
     while end_signal && op4 < olimit {
-        if mem_64bits() {
-            unsafe {
-                *dst.get_unchecked_mut(op1) =
-                    decode_symbol_x1(&mut bit_d1, &dtable.entries, table_log)
-            };
-            op1 += 1;
-            unsafe {
-                *dst.get_unchecked_mut(op2) =
-                    decode_symbol_x1(&mut bit_d2, &dtable.entries, table_log)
-            };
-            op2 += 1;
-            unsafe {
-                *dst.get_unchecked_mut(op3) =
-                    decode_symbol_x1(&mut bit_d3, &dtable.entries, table_log)
-            };
-            op3 += 1;
-            unsafe {
-                *dst.get_unchecked_mut(op4) =
-                    decode_symbol_x1(&mut bit_d4, &dtable.entries, table_log)
-            };
-            op4 += 1;
-        }
+        unsafe {
+            *dst.get_unchecked_mut(op1) = decode_symbol_x1(&mut bit_d1, &dtable.entries, table_log)
+        };
+        op1 += 1;
+        unsafe {
+            *dst.get_unchecked_mut(op2) = decode_symbol_x1(&mut bit_d2, &dtable.entries, table_log)
+        };
+        op2 += 1;
+        unsafe {
+            *dst.get_unchecked_mut(op3) = decode_symbol_x1(&mut bit_d3, &dtable.entries, table_log)
+        };
+        op3 += 1;
+        unsafe {
+            *dst.get_unchecked_mut(op4) = decode_symbol_x1(&mut bit_d4, &dtable.entries, table_log)
+        };
+        op4 += 1;
 
         unsafe {
             *dst.get_unchecked_mut(op1) = decode_symbol_x1(&mut bit_d1, &dtable.entries, table_log)
@@ -535,28 +519,22 @@ fn decompress_4x1_using_dtable(dst: &mut [u8], src: &[u8], dtable: &DTableX1) ->
         };
         op4 += 1;
 
-        if mem_64bits() {
-            unsafe {
-                *dst.get_unchecked_mut(op1) =
-                    decode_symbol_x1(&mut bit_d1, &dtable.entries, table_log)
-            };
-            op1 += 1;
-            unsafe {
-                *dst.get_unchecked_mut(op2) =
-                    decode_symbol_x1(&mut bit_d2, &dtable.entries, table_log)
-            };
-            op2 += 1;
-            unsafe {
-                *dst.get_unchecked_mut(op3) =
-                    decode_symbol_x1(&mut bit_d3, &dtable.entries, table_log)
-            };
-            op3 += 1;
-            unsafe {
-                *dst.get_unchecked_mut(op4) =
-                    decode_symbol_x1(&mut bit_d4, &dtable.entries, table_log)
-            };
-            op4 += 1;
-        }
+        unsafe {
+            *dst.get_unchecked_mut(op1) = decode_symbol_x1(&mut bit_d1, &dtable.entries, table_log)
+        };
+        op1 += 1;
+        unsafe {
+            *dst.get_unchecked_mut(op2) = decode_symbol_x1(&mut bit_d2, &dtable.entries, table_log)
+        };
+        op2 += 1;
+        unsafe {
+            *dst.get_unchecked_mut(op3) = decode_symbol_x1(&mut bit_d3, &dtable.entries, table_log)
+        };
+        op3 += 1;
+        unsafe {
+            *dst.get_unchecked_mut(op4) = decode_symbol_x1(&mut bit_d4, &dtable.entries, table_log)
+        };
+        op4 += 1;
 
         unsafe {
             *dst.get_unchecked_mut(op1) = decode_symbol_x1(&mut bit_d1, &dtable.entries, table_log)
@@ -934,7 +912,7 @@ unsafe fn decode_symbol_x2(
     table: &[DEltX2],
     table_log: u32,
 ) -> usize {
-    let value = bit_d.look_bits_fast(table_log);
+    let value = bit_d.look_bits_fast(table_log) as usize;
     // Safety: `look_bits_fast(table_log)` returns at most `(1 << table_log) - 1`
     // and `table` is sliced to exactly `1 << table_log` entries by every caller,
     // so `value < table.len()`.
@@ -963,21 +941,21 @@ fn decode_last_symbol_x2(
     table: &[DEltX2],
     table_log: u32,
 ) -> usize {
-    let value = bit_d.look_bits_fast(table_log);
+    let value = bit_d.look_bits_fast(table_log) as usize;
     debug_assert!(value < table.len());
     let entry = table[value & (table.len() - 1)];
     dst[pos] = entry.sequence as u8;
     if entry.length == 1 {
         bit_d.skip_bits(entry.nb_bits as u32);
-    } else if bit_d.bits_consumed < usize::BITS {
+    } else if bit_d.bits_consumed < CONTAINER_BITS {
         // Only the first of the pair is emitted, so the entry's bit cost
         // overstates what was consumed and can push the reader past the end of
         // its container. C pins it at the boundary instead of unwinding,
         // because the split cost of a pair cannot be recovered from the entry —
         // and it is sound only because no symbol follows this one.
         bit_d.skip_bits(entry.nb_bits as u32);
-        if bit_d.bits_consumed > usize::BITS {
-            bit_d.bits_consumed = usize::BITS;
+        if bit_d.bits_consumed > CONTAINER_BITS {
+            bit_d.bits_consumed = CONTAINER_BITS;
         }
     }
     1
@@ -997,10 +975,10 @@ fn decode_stream_x2(
     // debug-asserted: it is the whole safety argument, and it costs one
     // comparison per stream against millions of symbols.
     assert!(pos <= end && end <= dst.len());
-    let width = size_of_usize();
+    let width = CONTAINER_BYTES;
 
     if end - pos >= width {
-        if table_log <= DECODER_FAST_TABLELOG as u32 && mem_64bits() {
+        if table_log <= DECODER_FAST_TABLELOG as u32 {
             // Five entries is up to ten bytes, and a table this shallow cannot
             // spend more than 55 bits on them, so one reload covers the group.
             // Safety: the guard leaves ten bytes, and five entries advance at
@@ -1015,18 +993,13 @@ fn decode_stream_x2(
                 }
             }
         } else {
-            // Safety: the guard leaves `width` bytes; four entries (two on a
-            // 32-bit target, where `width` is 4) advance at most `width`, so the
-            // last write starts no later than `end - 2`.
+            // Safety: the guard leaves `width` bytes; four entries advance at
+            // most `width`, so the last write starts no later than `end - 2`.
             while bit_d.reload() == BitDStreamStatus::Unfinished && pos + width <= end {
                 unsafe {
-                    if mem_64bits() {
-                        pos += decode_symbol_x2(dst, pos, bit_d, table, table_log);
-                    }
                     pos += decode_symbol_x2(dst, pos, bit_d, table, table_log);
-                    if mem_64bits() {
-                        pos += decode_symbol_x2(dst, pos, bit_d, table, table_log);
-                    }
+                    pos += decode_symbol_x2(dst, pos, bit_d, table, table_log);
+                    pos += decode_symbol_x2(dst, pos, bit_d, table, table_log);
                     pos += decode_symbol_x2(dst, pos, bit_d, table, table_log);
                 }
             }
@@ -1101,7 +1074,7 @@ fn decompress_4x2_using_dtable(dst: &mut [u8], src: &[u8], dtable: &DTableX2) ->
     let mut end_signal = true;
     let table_log = dtable.table_log as u32;
     let table = &dtable.entries[..1usize << table_log];
-    let width = size_of_usize();
+    let width = CONTAINER_BYTES;
 
     // C bounds this loop on `op4` alone. That is sound for the single-symbol
     // decoder, where every entry advances all four cursors by exactly one byte
@@ -1113,11 +1086,10 @@ fn decompress_4x2_using_dtable(dst: &mut [u8], src: &[u8], dtable: &DTableX2) ->
     //
     // Safety for every `decode_symbol_x2` in the body: each guard leaves
     // `width` bytes before that cursor's segment end, and the four entries
-    // decoded from a stream per iteration (two on a 32-bit target, where
-    // `width` is 4) advance it by at most `width`, so the last write starts no
-    // later than two bytes before that end. The segment ends themselves are
-    // ordered `op_start2 <= op_start3 <= op_start4 <= dst.len()`, the last by
-    // the check above.
+    // decoded from a stream per iteration advance it by at most `width`, so the
+    // last write starts no later than two bytes before that end. The segment
+    // ends themselves are ordered `op_start2 <= op_start3 <= op_start4 <=
+    // dst.len()`, the last by the check above.
     #[allow(unsafe_code)]
     while end_signal
         && op1 + width <= op_start2
@@ -1126,22 +1098,18 @@ fn decompress_4x2_using_dtable(dst: &mut [u8], src: &[u8], dtable: &DTableX2) ->
         && op4 + width <= dst.len()
     {
         unsafe {
-            if mem_64bits() {
-                op1 += decode_symbol_x2(dst, op1, &mut bit_d1, table, table_log);
-                op2 += decode_symbol_x2(dst, op2, &mut bit_d2, table, table_log);
-                op3 += decode_symbol_x2(dst, op3, &mut bit_d3, table, table_log);
-                op4 += decode_symbol_x2(dst, op4, &mut bit_d4, table, table_log);
-            }
             op1 += decode_symbol_x2(dst, op1, &mut bit_d1, table, table_log);
             op2 += decode_symbol_x2(dst, op2, &mut bit_d2, table, table_log);
             op3 += decode_symbol_x2(dst, op3, &mut bit_d3, table, table_log);
             op4 += decode_symbol_x2(dst, op4, &mut bit_d4, table, table_log);
-            if mem_64bits() {
-                op1 += decode_symbol_x2(dst, op1, &mut bit_d1, table, table_log);
-                op2 += decode_symbol_x2(dst, op2, &mut bit_d2, table, table_log);
-                op3 += decode_symbol_x2(dst, op3, &mut bit_d3, table, table_log);
-                op4 += decode_symbol_x2(dst, op4, &mut bit_d4, table, table_log);
-            }
+            op1 += decode_symbol_x2(dst, op1, &mut bit_d1, table, table_log);
+            op2 += decode_symbol_x2(dst, op2, &mut bit_d2, table, table_log);
+            op3 += decode_symbol_x2(dst, op3, &mut bit_d3, table, table_log);
+            op4 += decode_symbol_x2(dst, op4, &mut bit_d4, table, table_log);
+            op1 += decode_symbol_x2(dst, op1, &mut bit_d1, table, table_log);
+            op2 += decode_symbol_x2(dst, op2, &mut bit_d2, table, table_log);
+            op3 += decode_symbol_x2(dst, op3, &mut bit_d3, table, table_log);
+            op4 += decode_symbol_x2(dst, op4, &mut bit_d4, table, table_log);
             op1 += decode_symbol_x2(dst, op1, &mut bit_d1, table, table_log);
             op2 += decode_symbol_x2(dst, op2, &mut bit_d2, table, table_log);
             op3 += decode_symbol_x2(dst, op3, &mut bit_d3, table, table_log);
@@ -1780,19 +1748,19 @@ pub(crate) fn compress_into(dst: &mut [u8], src: &[u8]) -> Result<usize> {
 #[inline(always)]
 fn encode_symbol(bit_c: &mut BitCStream<'_>, symbol: u8, ctable: &[CElt; SYMBOLVALUE_MAX + 1]) {
     let entry = ctable[symbol as usize];
-    bit_c.add_bits_fast(entry.val as usize, entry.nb_bits as u32);
+    bit_c.add_bits_fast(entry.val.into(), entry.nb_bits as u32);
 }
 
 #[inline(always)]
 fn flush_bits_1(bit_c: &mut BitCStream<'_>) {
-    if usize::BITS < (TABLELOG_MAX * 2 + 7) as u32 {
+    if CONTAINER_BITS < (TABLELOG_MAX * 2 + 7) as u32 {
         bit_c.flush_bits();
     }
 }
 
 #[inline(always)]
 fn flush_bits_2(bit_c: &mut BitCStream<'_>) {
-    if usize::BITS < (TABLELOG_MAX * 4 + 7) as u32 {
+    if CONTAINER_BITS < (TABLELOG_MAX * 4 + 7) as u32 {
         bit_c.flush_bits();
     }
 }
