@@ -247,7 +247,9 @@ impl<'a> StreamingEncoder<'a> {
     ///
     /// Nothing requires it: [`push`](Self::push) buffers whatever it is given
     /// and encodes a block once one is complete. Pushing this much at a time
-    /// simply means no byte waits in that buffer for a later call.
+    /// simply means no byte waits in that buffer for a later call -- except on
+    /// a stream whose pledge is its whole block, which holds that block back
+    /// for [`finish`](Self::finish) to flag; see [`push`](Self::push).
     pub const RECOMMENDED_INPUT_SIZE: usize = BLOCK_SIZE_MAX;
 
     /// Output buffer size that can always take one complete block in a single
@@ -329,6 +331,17 @@ impl<'a> StreamingEncoder<'a> {
     /// immediately; the trailing partial block stays buffered until enough
     /// input arrives or [`flush`](Self::flush) / [`finish`](Self::finish)
     /// runs. Returns an error if called after `finish` without an intervening `reset`.
+    ///
+    /// One stream produces nothing here at all. The block size is capped at
+    /// [`pledged_src_size`](crate::EncoderOptions::pledged_src_size), so a
+    /// pledge that fits in one block -- at default parameters, any pledge of
+    /// 128 KiB or less -- *is* the block size, and the whole content then waits
+    /// for `finish`, so that the single block carries the last-block flag
+    /// itself instead of trailing an empty block behind it. A caller pumping
+    /// [`read`](Self::read) between pushes sees the frame header and then
+    /// nothing until it finishes. This is upstream's behavior under the same
+    /// pledge, and it makes the frame identical to
+    /// [`encode_all_with_options`](crate::encode_all_with_options)'.
     pub fn push(&mut self, mut src: &[u8]) -> Result<()> {
         if self.finished {
             return Err(Error::InvalidParameter("cannot push after finish"));
@@ -352,8 +365,8 @@ impl<'a> StreamingEncoder<'a> {
         let target = self.push_target();
         while !src.is_empty() {
             // Held by `encode_buffered_chunk` draining the buffer outright, and
-            // by `flush` and `finish` doing the same. `block_size` is at least
-            // 1, so the top-up is too and the loop always advances.
+            // by `flush` and `finish` doing the same. `target` is at least 1,
+            // so the top-up is too and the loop always advances.
             debug_assert!(self.buffered_input.len() < target);
             let take = (target - self.buffered_input.len()).min(src.len());
             self.buffered_input.extend_from_slice(&src[..take]);
