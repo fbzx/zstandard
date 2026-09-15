@@ -52,6 +52,10 @@ pub(crate) struct ContiguousBlockMatchState {
     /// The parameters this state was built from.
     built_with: MatchFinderParameters,
     /// Whether a tagged table was built wide enough for positions past 16 MiB.
+    ///
+    /// False for every strategy that files no tagged table, so that
+    /// [`Self::reset_if_compatible`] does not refuse to reuse a chain, row or
+    /// binary-tree state whose layout the position limit never reached.
     wide_entries: bool,
 }
 
@@ -175,6 +179,21 @@ fn new_prefixed_double_fast_finders<E: TaggedEntry>(
     (prefix_finder, src_finder)
 }
 
+/// Whether a state built for `params` files positions a short-cache tag leaves
+/// no room for in a `u32`.
+///
+/// Only the two strategies that carry a tag beside the position can: every
+/// other finder files a bare `u32` and the bound never reaches its layout, so
+/// answering `true` for one of those would make
+/// [`ContiguousBlockMatchState::reset_if_compatible`] rebuild a table that had
+/// nothing to change.
+fn needs_wide_entries(params: MatchFinderParameters, position_limit: usize) -> bool {
+    matches!(
+        params.parser_strategy,
+        ParserStrategy::Fast | ParserStrategy::DoubleFast
+    ) && position_limit > PACKED_TAGGED_POSITION_LIMIT
+}
+
 impl ContiguousBlockMatchState {
     pub(crate) fn new(src_len: usize, params: MatchFinderParameters) -> Self {
         Self::new_with_position_limit(src_len, src_len, params)
@@ -185,18 +204,16 @@ impl ContiguousBlockMatchState {
         position_limit: usize,
         params: MatchFinderParameters,
     ) -> Self {
+        let wide_entries = needs_wide_entries(params, position_limit);
         let inner = match params.parser_strategy {
-            ParserStrategy::Fast if position_limit > PACKED_TAGGED_POSITION_LIMIT => {
-                ContiguousBlockMatchStateInner::WideFast(WideFastFinder::new(
-                    params.hash_bits,
-                    params.min_match,
-                ))
-            }
+            ParserStrategy::Fast if wide_entries => ContiguousBlockMatchStateInner::WideFast(
+                WideFastFinder::new(params.hash_bits, params.min_match),
+            ),
             ParserStrategy::Fast => ContiguousBlockMatchStateInner::Fast(FastFinder::new(
                 params.hash_bits,
                 params.min_match,
             )),
-            ParserStrategy::DoubleFast if position_limit > PACKED_TAGGED_POSITION_LIMIT => {
+            ParserStrategy::DoubleFast if wide_entries => {
                 ContiguousBlockMatchStateInner::WideDoubleFast(WideDoubleFastFinder::new(
                     params.hash_bits,
                     params.secondary_hash_bits,
@@ -232,7 +249,7 @@ impl ContiguousBlockMatchState {
             inner,
             fast_table_next_to_update: 0,
             built_with: params,
-            wide_entries: position_limit > PACKED_TAGGED_POSITION_LIMIT,
+            wide_entries,
         }
     }
 
@@ -272,7 +289,7 @@ impl ContiguousBlockMatchState {
         position_limit: usize,
     ) -> bool {
         if self.built_with != params
-            || self.wide_entries != (position_limit > PACKED_TAGGED_POSITION_LIMIT)
+            || self.wide_entries != needs_wide_entries(params, position_limit)
         {
             return false;
         }

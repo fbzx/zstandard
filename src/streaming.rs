@@ -245,10 +245,18 @@ fn frame_capacity_for(params: CompressionParameters, options: EncoderOptions) ->
 
 /// Largest indexed buffer a streaming finder can see before compaction.
 ///
-/// A pledge proves that the frame ends sooner and keeps its packed tables even
-/// when an explicit window would otherwise reserve a wider buffer. Without one
-/// the encoder cannot change representations mid-frame, so construction uses
-/// the compaction bound from [`frame_capacity_for`].
+/// A pledge says the frame ends sooner and keeps its packed tables even when
+/// an explicit window would otherwise reserve a wider buffer. Without one the
+/// encoder cannot change representations mid-frame, so construction uses the
+/// compaction bound from [`frame_capacity_for`].
+///
+/// [`finish`](StreamingEncoder::finish) is where a pledge is checked, so a
+/// caller that pledges short and pushes past it can carry packed tables over
+/// the boundary after all. That costs the ratio and nothing else, which is
+/// what the truncation cost before any of this: the position a truncated
+/// entry names is still one the parser bounds by `window_low` and confirms
+/// byte for byte before emitting a sequence, so the blocks already out stay
+/// valid -- and `finish` rejects the stream regardless.
 fn match_position_limit_for(params: CompressionParameters, options: EncoderOptions) -> usize {
     frame_capacity_for(params, options).min(
         options
