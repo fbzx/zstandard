@@ -247,7 +247,9 @@ impl<'a> StreamingEncoder<'a> {
     ///
     /// Nothing requires it: [`push`](Self::push) buffers whatever it is given
     /// and encodes a block once one is complete. Pushing this much at a time
-    /// simply means no byte waits in that buffer for a later call.
+    /// simply means no byte waits in that buffer for a later call -- except on
+    /// a stream whose pledge is its whole block, which holds that block back
+    /// for [`finish`](Self::finish) to flag; see [`push`](Self::push).
     pub const RECOMMENDED_INPUT_SIZE: usize = BLOCK_SIZE_MAX;
 
     /// Output buffer size that can always take one complete block in a single
@@ -329,6 +331,17 @@ impl<'a> StreamingEncoder<'a> {
     /// immediately; the trailing partial block stays buffered until enough
     /// input arrives or [`flush`](Self::flush) / [`finish`](Self::finish)
     /// runs. Returns an error if called after `finish` without an intervening `reset`.
+    ///
+    /// One stream produces nothing here at all. The block size is capped at
+    /// [`pledged_src_size`](crate::EncoderOptions::pledged_src_size), so a
+    /// pledge that fits in one block -- at default parameters, any pledge of
+    /// 128 KiB or less -- *is* the block size, and the whole content then waits
+    /// for `finish`, so that the single block carries the last-block flag
+    /// itself instead of trailing an empty block behind it. A caller pumping
+    /// [`read`](Self::read) between pushes sees the frame header and then
+    /// nothing until it finishes. This is upstream's behavior under the same
+    /// pledge, and it makes the frame identical to
+    /// [`encode_all_with_options`](crate::encode_all_with_options)'.
     pub fn push(&mut self, mut src: &[u8]) -> Result<()> {
         if self.finished {
             return Err(Error::InvalidParameter("cannot push after finish"));
@@ -349,19 +362,38 @@ impl<'a> StreamingEncoder<'a> {
         // Topping the buffer up to one block at a time rather than absorbing
         // `src` whole is what keeps a single large push from being held in
         // memory in its entirety.
+        let target = self.push_target();
         while !src.is_empty() {
             // Held by `encode_buffered_chunk` draining the buffer outright, and
-            // by `flush` and `finish` doing the same. `block_size` is at least
-            // 1, so the top-up is too and the loop always advances.
-            debug_assert!(self.buffered_input.len() < self.block_size());
-            let take = (self.block_size() - self.buffered_input.len()).min(src.len());
+            // by `flush` and `finish` doing the same. `target` is at least 1,
+            // so the top-up is too and the loop always advances.
+            debug_assert!(self.buffered_input.len() < target);
+            let take = (target - self.buffered_input.len()).min(src.len());
             self.buffered_input.extend_from_slice(&src[..take]);
             src = &src[take..];
-            if self.buffered_input.len() == self.block_size() {
+            if self.buffered_input.len() == target {
                 self.encode_buffered_chunk()?;
             }
         }
         Ok(())
+    }
+
+    /// How full the buffer must be before `push` encodes it.
+    ///
+    /// One block, except when the caller pledged exactly one block of
+    /// content: then it is one byte more, so the buffer never fills on a
+    /// stream that keeps its pledge and the only block goes out from `finish`,
+    /// flagged as last. Encoding it from `push` would send it unflagged and
+    /// leave `finish` to close the frame with an empty block, three bytes the
+    /// one-shot encoder does not spend on the same input.
+    ///
+    /// Upstream's `ZSTD_CCtx_init_compressStream2` does the same:
+    /// `inBuffTarget = blockSizeMax + (blockSizeMax == pledgedSrcSize)`. A stream
+    /// that then exceeds its pledge fills the buffer after all and encodes it
+    /// as two blocks, which does not matter because `finish` rejects it.
+    fn push_target(&self) -> usize {
+        let block_size = self.block_size();
+        block_size + usize::from(self.options.pledged_src_size == Some(block_size as u64))
     }
 
     /// Encode one full buffer's worth of input, emptying the buffer.
@@ -483,7 +515,9 @@ impl<'a> StreamingEncoder<'a> {
         // the closing chunk left the context short of `ZSTDcs_ending` -- that
         // is, produced no block of its own to carry the flag. So the cost is
         // the format's rather than this encoder's, and it falls only on a
-        // frame whose content is an exact multiple of the block size.
+        // frame whose content is an exact multiple of the block size -- and
+        // not even then when the content was pledged as exactly one block,
+        // which `push_target` holds back for this call to flag.
         //
         // It is worth naming because it is a floor under every comparison
         // between a streamed frame and a one-shot one: three bytes is 0.2% of
