@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.6] - 2026-09-16
 
 ### Fixed
 
@@ -134,6 +134,7 @@ Rust 1.96 (2024 edition), `std`. `wasm32-unknown-unknown` is checked in CI. Lice
 
 Development history from before this release is in [dev/PRERELEASE_LOG.md](dev/PRERELEASE_LOG.md). None of it is release history, since `0.1.0` is the first published version, but it records why much of the code is shaped the way it is.
 
+[0.1.6]: https://github.com/stephenberry/zstandard/releases/tag/v0.1.6
 [0.1.5]: https://github.com/stephenberry/zstandard/releases/tag/v0.1.5
 [0.1.4]: https://github.com/stephenberry/zstandard/releases/tag/v0.1.4
 [0.1.3]: https://github.com/stephenberry/zstandard/releases/tag/v0.1.3
