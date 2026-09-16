@@ -108,33 +108,43 @@ fn new_match_state(
     dictionary: Option<&EncoderDictionary<'_>>,
     params: CompressionParameters,
     frame_capacity: usize,
+    position_limit: usize,
 ) -> StreamingMatchState {
     let Some(dictionary) = dictionary else {
-        return StreamingMatchState::Contiguous(ContiguousBlockMatchState::new(
-            frame_capacity,
-            params.match_finder,
-        ));
+        return StreamingMatchState::Contiguous(
+            ContiguousBlockMatchState::new_with_position_limit(
+                frame_capacity,
+                position_limit,
+                params.match_finder,
+            ),
+        );
     };
     let content = dictionary.as_inner().content();
     if content.is_empty() {
-        return StreamingMatchState::Contiguous(ContiguousBlockMatchState::new(
-            frame_capacity,
-            params.match_finder,
-        ));
+        return StreamingMatchState::Contiguous(
+            ContiguousBlockMatchState::new_with_position_limit(
+                frame_capacity,
+                position_limit,
+                params.match_finder,
+            ),
+        );
     }
-    StreamingMatchState::Prefixed(PrefixedBlockMatchState::new_with_prepared_match_state(
-        content,
-        frame_capacity,
-        params.match_finder,
-        if dictionary.as_inner().is_raw_content() {
-            PrefixMatchMode::ExtDict
-        } else {
-            PrefixMatchMode::DictMatchState
-        },
-        dictionary
-            .prepared_match_state(params.match_finder)
-            .as_deref(),
-    ))
+    StreamingMatchState::Prefixed(
+        PrefixedBlockMatchState::new_with_prepared_match_state_and_position_limit(
+            content,
+            frame_capacity,
+            position_limit,
+            params.match_finder,
+            if dictionary.as_inner().is_raw_content() {
+                PrefixMatchMode::ExtDict
+            } else {
+                PrefixMatchMode::DictMatchState
+            },
+            dictionary
+                .prepared_match_state(params.match_finder)
+                .as_deref(),
+        ),
+    )
 }
 
 /// Largest block this frame may emit.
@@ -233,6 +243,29 @@ fn frame_capacity_for(params: CompressionParameters, options: EncoderOptions) ->
         .saturating_add(block_size_for(params, options))
 }
 
+/// Largest indexed buffer a streaming finder can see before compaction.
+///
+/// A pledge says the frame ends sooner and keeps its packed tables even when
+/// an explicit window would otherwise reserve a wider buffer. Without one the
+/// encoder cannot change representations mid-frame, so construction uses the
+/// compaction bound from [`frame_capacity_for`].
+///
+/// [`finish`](StreamingEncoder::finish) is where a pledge is checked, so a
+/// caller that pledges short and pushes past it can carry packed tables over
+/// the boundary after all. That costs the ratio and nothing else, which is
+/// what the truncation cost before any of this: the position a truncated
+/// entry names is still one the parser bounds by `window_low` and confirms
+/// byte for byte before emitting a sequence, so the blocks already out stay
+/// valid -- and `finish` rejects the stream regardless.
+fn match_position_limit_for(params: CompressionParameters, options: EncoderOptions) -> usize {
+    frame_capacity_for(params, options).min(
+        options
+            .pledged_src_size
+            .and_then(|size| usize::try_from(size).ok())
+            .unwrap_or(usize::MAX),
+    )
+}
+
 impl StreamingEncoder<'static> {
     /// Construct a dictionary-less streaming encoder with the given options.
     /// Writes the frame header into the output buffer immediately.
@@ -299,6 +332,7 @@ impl<'a> StreamingEncoder<'a> {
             dictionary.as_ref(),
             params,
             frame_capacity_for(params, options),
+            match_position_limit_for(params, options),
         );
         let mut encoder = Self {
             options,
@@ -817,16 +851,20 @@ impl<'a> StreamingEncoder<'a> {
         // prefixed state past this point would keep offering matches against
         // content the decoder can no longer reach.
         let reset_in_place = match &mut self.match_state {
-            StreamingMatchState::Contiguous(match_state) => {
-                match_state.reset_if_compatible(self.params.match_finder)
-            }
+            StreamingMatchState::Contiguous(match_state) => match_state.reset_if_compatible(
+                self.params.match_finder,
+                match_position_limit_for(self.params, self.options),
+            ),
             StreamingMatchState::Prefixed(_) => false,
         };
         if !reset_in_place {
-            self.match_state = StreamingMatchState::Contiguous(ContiguousBlockMatchState::new(
-                self.frame_capacity(),
-                self.params.match_finder,
-            ));
+            self.match_state = StreamingMatchState::Contiguous(
+                ContiguousBlockMatchState::new_with_position_limit(
+                    self.frame_capacity(),
+                    match_position_limit_for(self.params, self.options),
+                    self.params.match_finder,
+                ),
+            );
         }
 
         // Binary trees catch up lazily: the planner inserts everything from
@@ -912,8 +950,12 @@ impl<'a> StreamingEncoder<'a> {
         self.buffered_input.clear();
         self.frame.clear();
         self.savings = 0;
-        self.match_state =
-            new_match_state(self.dictionary.as_ref(), self.params, self.frame_capacity());
+        self.match_state = new_match_state(
+            self.dictionary.as_ref(),
+            self.params,
+            self.frame_capacity(),
+            match_position_limit_for(self.params, self.options),
+        );
         // A new frame starts at its own position zero, so the table cannot be
         // carried over: every entry in it names a byte the new frame's decoder
         // has never seen.

@@ -2868,3 +2868,58 @@ fn a_dict_match_state_parse_without_prepared_tables_says_so() {
         );
     }
 }
+
+/// A cached state is refused for reuse when the entry width it was built at no
+/// longer fits the next frame, and only then. The four strategies that file no
+/// tagged table cannot change width, so the 16 MiB boundary must not reach
+/// them: a reused `Encoder` that crosses it at level 10 would otherwise
+/// rebuild its row table for nothing.
+#[test]
+fn only_the_tagged_strategies_gate_reuse_on_the_entry_width() {
+    const BELOW: usize = PACKED_TAGGED_POSITION_LIMIT;
+    const ABOVE: usize = PACKED_TAGGED_POSITION_LIMIT + 1;
+
+    for strategy in [
+        ParserStrategy::Fast,
+        ParserStrategy::DoubleFast,
+        ParserStrategy::Greedy,
+        ParserStrategy::Lazy,
+        ParserStrategy::Lazy2,
+        ParserStrategy::GreedyRow,
+        ParserStrategy::LazyRow,
+        ParserStrategy::Lazy2Row,
+        ParserStrategy::BinaryTreeLazy2,
+        ParserStrategy::BinaryTreeOpt,
+        ParserStrategy::BinaryTreeUltra,
+    ] {
+        let params = MatchFinderParameters {
+            parser_strategy: strategy,
+            ..MatchFinderParameters::default()
+        };
+        let tagged = matches!(strategy, ParserStrategy::Fast | ParserStrategy::DoubleFast);
+
+        // Same width class on both sides: always reusable.
+        for limit in [BELOW, ABOVE] {
+            let mut state =
+                ContiguousBlockMatchState::new_with_position_limit(limit, limit, params);
+            assert!(
+                state.reset_if_compatible(params, limit),
+                "{strategy:?} refused reuse at an unchanged position limit of {limit}",
+            );
+        }
+
+        // Across the boundary: only a tagged table has a layout to change.
+        let mut state = ContiguousBlockMatchState::new_with_position_limit(BELOW, BELOW, params);
+        assert_eq!(
+            state.reset_if_compatible(params, ABOVE),
+            !tagged,
+            "{strategy:?} reuse across the 16 MiB boundary",
+        );
+        let mut state = ContiguousBlockMatchState::new_with_position_limit(ABOVE, ABOVE, params);
+        assert_eq!(
+            state.reset_if_compatible(params, BELOW),
+            !tagged,
+            "{strategy:?} reuse back across the 16 MiB boundary",
+        );
+    }
+}

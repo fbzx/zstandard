@@ -18,7 +18,7 @@ use zstandard::{
     BLOCK_SIZE_MAX, BlockHeader, BlockTraceDictionaryMode, BlockTraceDictionaryTableSource,
     BlockTraceEmittedMatchKind, BlockTraceMatchSource, BlockTraceParserStrategy,
     BlockTraceUpstreamStrategy, BlockType, CompressionLevel, DecoderDictionary, DecoderOptions,
-    EncoderDictionary, EncoderOptions, Error, Format, FrameHeader, LiteralCompressionMode,
+    Encoder, EncoderDictionary, EncoderOptions, Error, Format, FrameHeader, LiteralCompressionMode,
     ParameterOverrides, RowMatchFinderMode, Strategy, StreamingDecoder, StreamingEncoder,
     decode_all, decode_all_with_dict, decode_all_with_prepared_dict, encode_all_with_dict,
     encode_all_with_dict_and_options, encode_all_with_options, encode_all_with_prepared_dict,
@@ -3224,6 +3224,54 @@ fn streaming_block_layout_matches_upstream_streaming() {
                 delta * 100.0,
             );
         }
+    }
+}
+
+/// One-shot positions keep growing beyond 16 MiB, where a 24-bit entry wraps.
+#[test]
+fn fast_one_shot_stays_at_upstream_size_past_16_mib() {
+    let Some(helper) = upstream_trace_helper::helper_path() else {
+        return;
+    };
+
+    let mut input = benchmark_corpora::build_json_records_pattern(8 * 1024 * 1024);
+    input.extend(benchmark_corpora::build_tabular_csv_pattern(
+        9 * 1024 * 1024,
+    ));
+    let mut sizes = Vec::new();
+    for level in [1, 3] {
+        let options = EncoderOptions {
+            compression_level: CompressionLevel::try_new(level).unwrap(),
+            ..Default::default()
+        };
+        let mut encoder = Encoder::new();
+        encoder
+            .encode_all_with_options(&input[..8 * 1024 * 1024], options)
+            .unwrap();
+        let ours = encoder.encode_all_with_options(&input, options).unwrap();
+        let theirs = upstream_trace_helper::compress_advanced(
+            helper,
+            upstream_trace_helper::DICT_NONE,
+            &upstream_settings_for(level, &[]),
+            &input,
+        );
+        assert_eq!(decode_all(&ours).unwrap(), input);
+        assert_eq!(
+            upstream_trace_helper::decompress_once(helper, "decompress", &ours),
+            input
+        );
+        eprintln!(
+            "17 MiB level {level}: Rust {} bytes, upstream {} bytes",
+            ours.len(),
+            theirs.len()
+        );
+        sizes.push((level, ours.len(), theirs.len()));
+    }
+    for (level, ours, theirs) in sizes {
+        assert!(
+            ours <= theirs,
+            "level {level}: Rust {ours} bytes, upstream {theirs} bytes"
+        );
     }
 }
 

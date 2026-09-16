@@ -10650,7 +10650,7 @@ fn encode_all_into_scratch(
                 .take()
                 .and_then(|mut cached| {
                     cached
-                        .reset_if_compatible(params.match_finder)
+                        .reset_if_compatible(params.match_finder, src.len())
                         .then_some(cached)
                 })
                 .unwrap_or_else(|| ContiguousBlockMatchState::new(src.len(), params.match_finder));

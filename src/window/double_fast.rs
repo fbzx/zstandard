@@ -8,7 +8,7 @@ pub(crate) struct DoubleFastMatch {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct DoubleFastFinder {
+pub(crate) struct DoubleFastFinderImpl<E: TaggedEntry> {
     /// Filed positions with their tags, one [`long_entry`] per slot.
     ///
     /// The tag comes from the same hash that chose the slot, and the parser
@@ -24,18 +24,21 @@ pub(crate) struct DoubleFastFinder {
     /// has to travel with the position because they are read together every
     /// iteration, and holding them in two arrays means two cache lines and
     /// two stores per iteration against upstream's one of each. It cannot
-    /// share a `u32` with the position the way the short table's tag does,
-    /// because this table files raw source indices that run to the length of
-    /// the whole input on the one-shot path and a 24-bit field wraps every
-    /// one past 16 MiB.
+    /// share a `u32` with the position the way the short table can on bounded
+    /// inputs, because this table files raw source indices that run to the
+    /// length of the whole input on the one-shot path. The short table selects
+    /// its entry width from that bound at construction.
     pub(crate) long_entries: Vec<u64>,
-    pub(crate) short_heads: Vec<u32>,
+    pub(crate) short_heads: Vec<E>,
     pub(crate) long_hash_bits: u32,
     pub(crate) short_hash_bits: u32,
     pub(crate) min_match: u32,
 }
 
-impl DoubleFastFinder {
+pub(crate) type DoubleFastFinder = DoubleFastFinderImpl<u32>;
+pub(crate) type WideDoubleFastFinder = DoubleFastFinderImpl<u64>;
+
+impl<E: TaggedEntry> DoubleFastFinderImpl<E> {
     pub(crate) fn new(long_hash_bits: u32, short_hash_bits: u32, min_match: u32) -> Self {
         let long_hash_bits = long_hash_bits.clamp(10, MAX_MATCH_HASH_BITS);
         // Only the short table is hashed through the 32-bit tagged path; the
@@ -44,7 +47,7 @@ impl DoubleFastFinder {
         let short_hash_bits = tagged_match_hash_bits(short_hash_bits);
         Self {
             long_entries: vec![LONG_ENTRY_EMPTY; 1usize << long_hash_bits],
-            short_heads: vec![NO_POS; 1usize << short_hash_bits],
+            short_heads: vec![E::EMPTY; 1usize << short_hash_bits],
             long_hash_bits,
             short_hash_bits,
             min_match: min_match.clamp(4, 7),
@@ -99,7 +102,7 @@ impl DoubleFastFinder {
     /// `short_hash_bits`.
     #[allow(unsafe_code)]
     #[inline(always)]
-    pub(crate) unsafe fn get_short_head(&self, hash: usize) -> u32 {
+    pub(crate) unsafe fn get_short_head(&self, hash: usize) -> E {
         debug_assert!(hash < self.short_heads.len());
         // SAFETY: `hash` is in bounds by contract.
         unsafe { *self.short_heads.get_unchecked(hash) }
@@ -112,10 +115,10 @@ impl DoubleFastFinder {
     /// `hash < self.short_heads.len()`.
     #[allow(unsafe_code)]
     #[inline(always)]
-    pub(crate) unsafe fn set_short_head(&mut self, hash: usize, pos: u32) {
+    pub(crate) unsafe fn set_short_head(&mut self, hash: usize, entry: E) {
         debug_assert!(hash < self.short_heads.len());
         // SAFETY: `hash` is in bounds by contract.
-        unsafe { *self.short_heads.get_unchecked_mut(hash) = pos };
+        unsafe { *self.short_heads.get_unchecked_mut(hash) = entry };
     }
 
     #[inline(always)]
@@ -142,7 +145,7 @@ impl DoubleFastFinder {
 
     pub(crate) fn reset(&mut self) {
         self.long_entries.fill(LONG_ENTRY_EMPTY);
-        self.short_heads.fill(NO_POS);
+        self.short_heads.fill(E::EMPTY);
     }
 
     /// Rebase every filed position by `delta`.
@@ -383,14 +386,14 @@ pub(crate) fn plan_sequences_double_fast_without_prefix_into(
 }
 
 #[allow(dead_code)]
-pub(crate) fn plan_sequences_double_fast_without_prefix_from(
+pub(crate) fn plan_sequences_double_fast_without_prefix_from<E: TaggedEntry>(
     src: &[u8],
     block_start: usize,
     repeat_offsets: RepeatOffsets,
     params: MatchFinderParameters,
     window_low: usize,
     rep_window_low: usize,
-    finder: &mut DoubleFastFinder,
+    finder: &mut DoubleFastFinderImpl<E>,
 ) -> Result<SequencePlan> {
     let mut plan = SequencePlan::default();
     plan_sequences_double_fast_without_prefix_from_into(
@@ -406,7 +409,7 @@ pub(crate) fn plan_sequences_double_fast_without_prefix_from(
     Ok(plan)
 }
 
-pub(crate) fn plan_sequences_double_fast_without_prefix_from_into(
+pub(crate) fn plan_sequences_double_fast_without_prefix_from_into<E: TaggedEntry>(
     plan: &mut SequencePlan,
     src: &[u8],
     block_start: usize,
@@ -414,11 +417,11 @@ pub(crate) fn plan_sequences_double_fast_without_prefix_from_into(
     params: MatchFinderParameters,
     window_low: usize,
     rep_window_low: usize,
-    finder: &mut DoubleFastFinder,
+    finder: &mut DoubleFastFinderImpl<E>,
 ) -> Result<()> {
     if plan.tracing_enabled() {
         match finder.min_match {
-            4 => plan_sequences_double_fast_without_prefix_inner_tracing::<4>(
+            4 => plan_sequences_double_fast_without_prefix_inner_tracing::<E, 4>(
                 plan,
                 src,
                 block_start,
@@ -428,7 +431,7 @@ pub(crate) fn plan_sequences_double_fast_without_prefix_from_into(
                 rep_window_low,
                 finder,
             ),
-            5 => plan_sequences_double_fast_without_prefix_inner_tracing::<5>(
+            5 => plan_sequences_double_fast_without_prefix_inner_tracing::<E, 5>(
                 plan,
                 src,
                 block_start,
@@ -438,7 +441,7 @@ pub(crate) fn plan_sequences_double_fast_without_prefix_from_into(
                 rep_window_low,
                 finder,
             ),
-            6 => plan_sequences_double_fast_without_prefix_inner_tracing::<6>(
+            6 => plan_sequences_double_fast_without_prefix_inner_tracing::<E, 6>(
                 plan,
                 src,
                 block_start,
@@ -448,7 +451,7 @@ pub(crate) fn plan_sequences_double_fast_without_prefix_from_into(
                 rep_window_low,
                 finder,
             ),
-            _ => plan_sequences_double_fast_without_prefix_inner_tracing::<7>(
+            _ => plan_sequences_double_fast_without_prefix_inner_tracing::<E, 7>(
                 plan,
                 src,
                 block_start,
@@ -461,7 +464,7 @@ pub(crate) fn plan_sequences_double_fast_without_prefix_from_into(
         }
     } else {
         match finder.min_match {
-            4 => plan_sequences_double_fast_without_prefix_inner_no_trace::<4>(
+            4 => plan_sequences_double_fast_without_prefix_inner_no_trace::<E, 4>(
                 plan,
                 src,
                 block_start,
@@ -471,7 +474,7 @@ pub(crate) fn plan_sequences_double_fast_without_prefix_from_into(
                 rep_window_low,
                 finder,
             ),
-            5 => plan_sequences_double_fast_without_prefix_inner_no_trace::<5>(
+            5 => plan_sequences_double_fast_without_prefix_inner_no_trace::<E, 5>(
                 plan,
                 src,
                 block_start,
@@ -481,7 +484,7 @@ pub(crate) fn plan_sequences_double_fast_without_prefix_from_into(
                 rep_window_low,
                 finder,
             ),
-            6 => plan_sequences_double_fast_without_prefix_inner_no_trace::<6>(
+            6 => plan_sequences_double_fast_without_prefix_inner_no_trace::<E, 6>(
                 plan,
                 src,
                 block_start,
@@ -491,7 +494,7 @@ pub(crate) fn plan_sequences_double_fast_without_prefix_from_into(
                 rep_window_low,
                 finder,
             ),
-            _ => plan_sequences_double_fast_without_prefix_inner_no_trace::<7>(
+            _ => plan_sequences_double_fast_without_prefix_inner_no_trace::<E, 7>(
                 plan,
                 src,
                 block_start,
@@ -509,14 +512,14 @@ pub(crate) fn plan_sequences_double_fast_without_prefix_from_into(
 // ---- Tracing path (preserves existing behavior for tests) ----
 
 #[inline(always)]
-fn chain_rep2_double_fast(
+fn chain_rep2_double_fast<E: TaggedEntry>(
     plan: &mut SequencePlan,
     src: &[u8],
     anchor: &mut usize,
     repeat_offsets: &mut RepeatOffsets,
     rep_offsets: &mut (usize, usize),
     ip: &mut usize,
-    finder: &mut DoubleFastFinder,
+    finder: &mut DoubleFastFinderImpl<E>,
     current: usize,
     search_limit: usize,
     rep_window_low: usize,
@@ -549,7 +552,7 @@ fn chain_rep2_double_fast(
 }
 
 #[inline(always)]
-fn plan_sequences_double_fast_without_prefix_inner_tracing<const MLS: u32>(
+fn plan_sequences_double_fast_without_prefix_inner_tracing<E: TaggedEntry, const MLS: u32>(
     plan: &mut SequencePlan,
     src: &[u8],
     block_start: usize,
@@ -557,7 +560,7 @@ fn plan_sequences_double_fast_without_prefix_inner_tracing<const MLS: u32>(
     params: MatchFinderParameters,
     window_low: usize,
     rep_window_low: usize,
-    finder: &mut DoubleFastFinder,
+    finder: &mut DoubleFastFinderImpl<E>,
 ) -> Result<()> {
     let block_len = src.len().saturating_sub(block_start);
     plan.reset_for_block(block_len);
@@ -869,14 +872,14 @@ fn store_explicit_sequence_no_trace(
 
 /// No-trace rep2 chain for DoubleFast. Uses local rep variables, returns `()`.
 #[inline(always)]
-fn chain_rep2_double_fast_no_trace(
+fn chain_rep2_double_fast_no_trace<E: TaggedEntry>(
     plan: &mut SequencePlan,
     src: &[u8],
     anchor: &mut usize,
     rep1: &mut usize,
     rep2: &mut usize,
     ip: &mut usize,
-    finder: &mut DoubleFastFinder,
+    finder: &mut DoubleFastFinderImpl<E>,
     current: usize,
     search_limit: usize,
     rep_window_low: usize,
@@ -907,7 +910,7 @@ fn chain_rep2_double_fast_no_trace(
 }
 
 #[inline(always)]
-fn plan_sequences_double_fast_without_prefix_inner_no_trace<const MLS: u32>(
+fn plan_sequences_double_fast_without_prefix_inner_no_trace<E: TaggedEntry, const MLS: u32>(
     plan: &mut SequencePlan,
     src: &[u8],
     block_start: usize,
@@ -915,7 +918,7 @@ fn plan_sequences_double_fast_without_prefix_inner_no_trace<const MLS: u32>(
     params: MatchFinderParameters,
     window_low: usize,
     rep_window_low: usize,
-    finder: &mut DoubleFastFinder,
+    finder: &mut DoubleFastFinderImpl<E>,
 ) {
     let block_len = src.len().saturating_sub(block_start);
     plan.reset_for_block(block_len);
@@ -1219,7 +1222,7 @@ pub(crate) fn plan_sequences_double_fast_with_prefix_into(
 }
 
 #[allow(dead_code)]
-pub(crate) fn plan_sequences_double_fast_with_prefix_from(
+pub(crate) fn plan_sequences_double_fast_with_prefix_from<E: TaggedEntry>(
     src: &[u8],
     block_start: usize,
     prefix: &[u8],
@@ -1227,8 +1230,8 @@ pub(crate) fn plan_sequences_double_fast_with_prefix_from(
     params: MatchFinderParameters,
     prefix_low: usize,
     source_low: usize,
-    prefix_finder: &DoubleFastFinder,
-    src_finder: &mut DoubleFastFinder,
+    prefix_finder: &DoubleFastFinderImpl<E>,
+    src_finder: &mut DoubleFastFinderImpl<E>,
 ) -> Result<SequencePlan> {
     let mut plan = SequencePlan::default();
     plan_sequences_double_fast_with_prefix_from_into(
@@ -1253,7 +1256,7 @@ pub(crate) fn plan_sequences_double_fast_with_prefix_from(
 /// Both of them dispatch on `min_match` themselves, so this does not: it does
 /// the per-block bookkeeping they share and hands off. It was monomorphised on
 /// `min_match` for as long as a third parse lived here inline.
-pub(crate) fn plan_sequences_double_fast_with_prefix_from_into(
+pub(crate) fn plan_sequences_double_fast_with_prefix_from_into<E: TaggedEntry>(
     plan: &mut SequencePlan,
     src: &[u8],
     block_start: usize,
@@ -1262,8 +1265,8 @@ pub(crate) fn plan_sequences_double_fast_with_prefix_from_into(
     params: MatchFinderParameters,
     prefix_low: usize,
     source_low: usize,
-    prefix_finder: Option<&DoubleFastFinder>,
-    src_finder: &mut DoubleFastFinder,
+    prefix_finder: Option<&DoubleFastFinderImpl<E>>,
+    src_finder: &mut DoubleFastFinderImpl<E>,
     mode: PrefixMatchMode,
     prepared: Option<&PreparedDoubleFastDictionaryTables>,
 ) -> Result<()> {
@@ -1323,8 +1326,8 @@ pub(crate) fn plan_sequences_double_fast_with_prefix_from_into(
     )
 }
 
-fn extdict_insert_src_short_position(
-    finder: &mut DoubleFastFinder,
+fn extdict_insert_src_short_position<E: TaggedEntry>(
+    finder: &mut DoubleFastFinderImpl<E>,
     src: &[u8],
     source_base: usize,
     pos: usize,
@@ -1335,8 +1338,8 @@ fn extdict_insert_src_short_position(
     }
 }
 
-fn extdict_insert_src_long_position(
-    finder: &mut DoubleFastFinder,
+fn extdict_insert_src_long_position<E: TaggedEntry>(
+    finder: &mut DoubleFastFinderImpl<E>,
     src: &[u8],
     source_base: usize,
     pos: usize,
@@ -1347,8 +1350,8 @@ fn extdict_insert_src_long_position(
     }
 }
 
-fn extdict_insert_double_fast_match_positions(
-    finder: &mut DoubleFastFinder,
+fn extdict_insert_double_fast_match_positions<E: TaggedEntry>(
+    finder: &mut DoubleFastFinderImpl<E>,
     src: &[u8],
     source_base: usize,
     current: usize,
@@ -1361,10 +1364,10 @@ fn extdict_insert_double_fast_match_positions(
     extdict_insert_src_short_position(finder, src, source_base, ip.saturating_sub(1));
 }
 
-fn write_back_extdict_source_tables(
+fn write_back_extdict_source_tables<E: TaggedEntry>(
     source_base: usize,
-    combined_finder: &DoubleFastFinder,
-    src_finder: &mut DoubleFastFinder,
+    combined_finder: &DoubleFastFinderImpl<E>,
+    src_finder: &mut DoubleFastFinderImpl<E>,
 ) {
     let source_base_u32 = source_base as u32;
     for (dst, entry) in src_finder
@@ -1372,12 +1375,12 @@ fn write_back_extdict_source_tables(
         .iter_mut()
         .zip(combined_finder.short_heads.iter().copied())
     {
-        let pos = tagged_pos(entry) as u32;
-        *dst = if entry != NO_POS && pos >= source_base_u32 {
+        let pos = tagged_pos(entry);
+        *dst = if entry != E::EMPTY && pos >= source_base {
             // Preserve the tag bits, adjust the position
-            tagged_entry((pos - source_base_u32) as usize, entry as usize)
+            entry.with_position(pos - source_base)
         } else {
-            NO_POS
+            E::EMPTY
         };
     }
     // A slot names the same eight bytes on both sides, so its tag carries over
@@ -1554,7 +1557,7 @@ fn extdict_extend_back_logical_match_with_min_start(
     found
 }
 
-fn plan_sequences_double_fast_with_ext_dict_from_into(
+fn plan_sequences_double_fast_with_ext_dict_from_into<E: TaggedEntry>(
     plan: &mut SequencePlan,
     src: &[u8],
     block_start: usize,
@@ -1563,8 +1566,8 @@ fn plan_sequences_double_fast_with_ext_dict_from_into(
     params: MatchFinderParameters,
     prefix_low: usize,
     source_low: usize,
-    prefix_finder: &DoubleFastFinder,
-    src_finder: &mut DoubleFastFinder,
+    prefix_finder: &DoubleFastFinderImpl<E>,
+    src_finder: &mut DoubleFastFinderImpl<E>,
 ) -> Result<()> {
     let prefix_len = prefix.len();
     let prefix_base = params.ext_dict_index_bias;
@@ -1606,12 +1609,12 @@ fn plan_sequences_double_fast_with_ext_dict_from_into(
         .iter_mut()
         .zip(src_finder.short_heads.iter().copied())
     {
-        if src_entry != NO_POS {
-            let pos = tagged_pos(src_entry) as u32;
-            *dst = tagged_entry((source_base_u32 + pos) as usize, src_entry as usize);
-        } else if *dst != NO_POS {
-            let pos = tagged_pos(*dst) as u32;
-            *dst = tagged_entry((prefix_base_u32 + pos) as usize, *dst as usize);
+        if src_entry != E::EMPTY {
+            let pos = tagged_pos(src_entry);
+            *dst = src_entry.with_position(source_base + pos);
+        } else if *dst != E::EMPTY {
+            let pos = tagged_pos(*dst);
+            *dst = dst.with_position(prefix_base + pos);
         }
     }
     for (dst, src_entry) in combined_finder
@@ -1718,7 +1721,7 @@ fn plan_sequences_double_fast_with_ext_dict_from_into(
                 SequenceTraceMatchSource::Unknown,
             )?;
             ip = anchor;
-        } else if short_entry != NO_POS
+        } else if short_entry != E::EMPTY
             && match_index >= logical_low
             && match_index < current_logical
             && extdict_match_u32(prefix, src, prefix_base, match_index, current_logical)
@@ -1854,7 +1857,7 @@ fn plan_sequences_double_fast_with_ext_dict_from_into(
     Ok(())
 }
 
-pub(crate) fn plan_sequences_double_fast_with_prepared_dict_from_into(
+pub(crate) fn plan_sequences_double_fast_with_prepared_dict_from_into<E: TaggedEntry>(
     plan: &mut SequencePlan,
     src: &[u8],
     block_start: usize,
@@ -1864,10 +1867,10 @@ pub(crate) fn plan_sequences_double_fast_with_prepared_dict_from_into(
     prefix_low: usize,
     source_low: usize,
     prepared: &PreparedDoubleFastDictionaryTables,
-    src_finder: &mut DoubleFastFinder,
+    src_finder: &mut DoubleFastFinderImpl<E>,
 ) -> Result<()> {
     match src_finder.min_match {
-        4 => plan_sequences_double_fast_with_prepared_dict_inner::<4>(
+        4 => plan_sequences_double_fast_with_prepared_dict_inner::<E, 4>(
             plan,
             src,
             block_start,
@@ -1879,7 +1882,7 @@ pub(crate) fn plan_sequences_double_fast_with_prepared_dict_from_into(
             prepared,
             src_finder,
         ),
-        5 => plan_sequences_double_fast_with_prepared_dict_inner::<5>(
+        5 => plan_sequences_double_fast_with_prepared_dict_inner::<E, 5>(
             plan,
             src,
             block_start,
@@ -1891,7 +1894,7 @@ pub(crate) fn plan_sequences_double_fast_with_prepared_dict_from_into(
             prepared,
             src_finder,
         ),
-        6 => plan_sequences_double_fast_with_prepared_dict_inner::<6>(
+        6 => plan_sequences_double_fast_with_prepared_dict_inner::<E, 6>(
             plan,
             src,
             block_start,
@@ -1903,7 +1906,7 @@ pub(crate) fn plan_sequences_double_fast_with_prepared_dict_from_into(
             prepared,
             src_finder,
         ),
-        _ => plan_sequences_double_fast_with_prepared_dict_inner::<7>(
+        _ => plan_sequences_double_fast_with_prepared_dict_inner::<E, 7>(
             plan,
             src,
             block_start,
@@ -1918,7 +1921,7 @@ pub(crate) fn plan_sequences_double_fast_with_prepared_dict_from_into(
     }
 }
 
-fn plan_sequences_double_fast_with_prepared_dict_inner<const MLS: u32>(
+fn plan_sequences_double_fast_with_prepared_dict_inner<E: TaggedEntry, const MLS: u32>(
     plan: &mut SequencePlan,
     src: &[u8],
     block_start: usize,
@@ -1928,7 +1931,7 @@ fn plan_sequences_double_fast_with_prepared_dict_inner<const MLS: u32>(
     prefix_low: usize,
     source_low: usize,
     prepared: &PreparedDoubleFastDictionaryTables,
-    src_finder: &mut DoubleFastFinder,
+    src_finder: &mut DoubleFastFinderImpl<E>,
 ) -> Result<()> {
     let prefix_len = prefix.len();
     let search_limit = src.len().saturating_sub(8);
@@ -2059,7 +2062,7 @@ fn plan_sequences_double_fast_with_prepared_dict_inner<const MLS: u32>(
                 found = Some(long_match);
                 found_source = long_source;
             } else {
-                let source_short_candidate = (src_short_entry != NO_POS
+                let source_short_candidate = (src_short_entry != E::EMPTY
                     && src_short_candidate >= source_low
                     && src_short_candidate < ip)
                     .then(|| prefix_len + src_short_candidate);
@@ -2278,12 +2281,12 @@ fn plan_sequences_double_fast_with_prepared_dict_inner<const MLS: u32>(
 }
 
 #[allow(dead_code)]
-pub(crate) fn search_double_fast_without_prefix(
+pub(crate) fn search_double_fast_without_prefix<E: TaggedEntry>(
     src: &[u8],
     pos: usize,
     anchor: usize,
     repeat_offsets: [u32; 3],
-    finder: &mut DoubleFastFinder,
+    finder: &mut DoubleFastFinderImpl<E>,
     window_low: usize,
 ) -> Option<DoubleFastMatch> {
     if pos + 8 > src.len() {
@@ -2333,7 +2336,7 @@ pub(crate) fn search_double_fast_without_prefix(
     }
 
     let short_match =
-        if short_entry != NO_POS && short_candidate >= window_low && short_candidate < pos {
+        if short_entry != E::EMPTY && short_candidate >= window_low && short_candidate < pos {
             #[allow(unsafe_code)]
             let length = unsafe { count_match_length_unchecked(src, short_candidate, pos) };
             (length >= MIN_MATCH).then(|| DoubleFastMatch {
@@ -2372,14 +2375,14 @@ pub(crate) fn search_double_fast_without_prefix(
 }
 
 #[allow(dead_code)]
-pub(crate) fn search_double_fast_with_prefix(
+pub(crate) fn search_double_fast_with_prefix<E: TaggedEntry>(
     prefix: &[u8],
     src: &[u8],
     pos: usize,
     anchor: usize,
     repeat_offsets: [u32; 3],
-    prefix_finder: &DoubleFastFinder,
-    src_finder: &mut DoubleFastFinder,
+    prefix_finder: &DoubleFastFinderImpl<E>,
+    src_finder: &mut DoubleFastFinderImpl<E>,
     params: MatchFinderParameters,
     prefix_low: usize,
     source_low: usize,
@@ -2467,7 +2470,7 @@ pub(crate) fn search_double_fast_with_prefix(
         ));
     }
 
-    let src_short_match = if src_short_entry != NO_POS
+    let src_short_match = if src_short_entry != E::EMPTY
         && src_short_candidate >= source_low
         && src_short_candidate < pos
     {
@@ -2481,7 +2484,7 @@ pub(crate) fn search_double_fast_with_prefix(
         None
     };
 
-    let prefix_short_match = (prefix_short_entry != NO_POS
+    let prefix_short_match = (prefix_short_entry != E::EMPTY
         && prefix_short_candidate >= prefix_low
         && prefix_short_candidate + MIN_MATCH <= prefix.len()
         && logical_match_has_length(
