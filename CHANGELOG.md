@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Compression at levels 16 and up is faster. The optimal parser pays each candidate's offset price once per length scan and reads the length's share from a table it recomputes once per stored sequence, instead of recomputing both at every length. Output is byte-identical at every level, and the benchmark corpora encode 3 to 14 % faster per level, most of it above level 19. The gain narrows on large inputs, where pricing is a smaller share of the encode.
+
 ## [0.1.6] - 2026-09-16
 
 ### Fixed

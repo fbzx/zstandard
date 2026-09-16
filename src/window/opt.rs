@@ -26,6 +26,19 @@ pub(crate) struct OptimalPriceModel<const IS_ULTRA: bool> {
     pub(crate) ml_sum_base_price: u32,
     pub(crate) of_sum_base_price: u32,
     pub(crate) lit_sum_base_price: u32,
+    /// [`match_length_price`](Self::match_length_price) for every match
+    /// length code.
+    ///
+    /// The parser prices each candidate at every length it can take, and the
+    /// length's share of that price depends on nothing but the code and the
+    /// current statistics. Every path that moves the statistics ends in
+    /// [`set_base_prices`](Self::set_base_prices), so the 53 values are
+    /// computed there, once per stored sequence, rather than once per length
+    /// per candidate.
+    ///
+    /// The predefined model has no statistics to fold in and prices a length
+    /// by formula, so it never reads this.
+    ml_price_by_code: [u32; 53],
     /// Penalize long offsets (off_code >= 20). True for btopt/btultra,
     /// false for btultra2 (matching C's optLevel < 2 check).
     pub(crate) long_offset_penalty: bool,
@@ -565,6 +578,7 @@ impl<const IS_ULTRA: bool> OptimalPriceModel<IS_ULTRA> {
                 ml_sum_base_price: 0,
                 of_sum_base_price: 0,
                 lit_sum_base_price: 0,
+                ml_price_by_code: [0; 53],
                 long_offset_penalty,
                 compressed_literals,
             };
@@ -590,6 +604,7 @@ impl<const IS_ULTRA: bool> OptimalPriceModel<IS_ULTRA> {
             ml_sum_base_price: 0,
             of_sum_base_price: 0,
             lit_sum_base_price: 0,
+            ml_price_by_code: [0; 53],
             long_offset_penalty,
             compressed_literals,
         };
@@ -644,6 +659,16 @@ impl<const IS_ULTRA: bool> OptimalPriceModel<IS_ULTRA> {
         if self.compressed_literals {
             self.lit_sum_base_price = self.weight(self.lit_sum);
         }
+        // The predefined model prices a length by formula and never reads the
+        // table, so filling it there would be 53 weights per stored sequence
+        // that nothing looks at.
+        if !matches!(self.price_type, OptimalPriceType::Predefined) {
+            for code in 0..self.ml_price_by_code.len() {
+                self.ml_price_by_code[code] = ml_bits(code as u8) * OPT_PRICE_UNIT
+                    + self.ml_sum_base_price
+                    - self.weight(self.ml_freq[code]);
+            }
+        }
     }
 
     /// Create a price model from rescaled cross-block state.
@@ -666,6 +691,7 @@ impl<const IS_ULTRA: bool> OptimalPriceModel<IS_ULTRA> {
             ml_sum_base_price: 0,
             of_sum_base_price: 0,
             lit_sum_base_price: 0,
+            ml_price_by_code: [0; 53],
             long_offset_penalty,
             compressed_literals,
         };
@@ -730,14 +756,22 @@ impl<const IS_ULTRA: bool> OptimalPriceModel<IS_ULTRA> {
             - self.weight(self.ll_freq[ll_code])
     }
 
+    /// The part of a match's price that depends only on its offset.
+    ///
+    /// C's `ZSTD_getMatchPrice` is this plus
+    /// [`match_length_price`](Self::match_length_price). It is split so that a
+    /// scan over one candidate's lengths can pay for the offset once, which is
+    /// how both callers use it; nothing needs the sum under one name.
+    ///
+    /// The terms are the ones C adds, in a different order. Every
+    /// intermediate is a small unsigned sum, so neither half wraps or
+    /// underflows on its own and the total is unchanged.
     #[inline(always)]
-    pub(crate) fn match_price(&self, offset_value: u32, match_length: u32) -> u32 {
+    pub(crate) fn offset_price(&self, offset_value: u32) -> u32 {
         let off_code = offset_code_unchecked(offset_value) as usize;
-        let ml_code = match_length_code_unchecked(match_length) as usize;
 
         if matches!(self.price_type, OptimalPriceType::Predefined) {
-            return self.weight(match_length.wrapping_sub(OPT_REPCODE_MIN_MATCH as u32))
-                + (16 + off_code as u32) * OPT_PRICE_UNIT;
+            return (16 + off_code as u32) * OPT_PRICE_UNIT;
         }
 
         let mut price = off_code as u32 * OPT_PRICE_UNIT + self.of_sum_base_price
@@ -745,9 +779,26 @@ impl<const IS_ULTRA: bool> OptimalPriceModel<IS_ULTRA> {
         if self.long_offset_penalty && off_code >= 20 {
             price += (off_code as u32 - 19) * 2 * OPT_PRICE_UNIT;
         }
-        price += ml_bits(ml_code as u8) * OPT_PRICE_UNIT + self.ml_sum_base_price
-            - self.weight(self.ml_freq[ml_code]);
         price + OPT_PRICE_UNIT / 5
+    }
+
+    /// The part of a match's price that depends only on its length, read from
+    /// [`ml_price_by_code`](Self::ml_price_by_code). The assertion holds the
+    /// table to the formula it stands in for, so a change to the price model
+    /// that forgets the table fails in debug rather than encoding differently.
+    #[inline(always)]
+    pub(crate) fn match_length_price(&self, match_length: u32) -> u32 {
+        if matches!(self.price_type, OptimalPriceType::Predefined) {
+            return self.weight(match_length.wrapping_sub(OPT_REPCODE_MIN_MATCH as u32));
+        }
+
+        let ml_code = match_length_code_unchecked(match_length) as usize;
+        debug_assert_eq!(
+            self.ml_price_by_code[ml_code],
+            ml_bits(ml_code as u8) * OPT_PRICE_UNIT + self.ml_sum_base_price
+                - self.weight(self.ml_freq[ml_code])
+        );
+        self.ml_price_by_code[ml_code]
     }
 
     pub(crate) fn update_stats(
@@ -1738,10 +1789,16 @@ pub(crate) fn init_optimal_match_nodes<const IS_ULTRA: bool>(
     let mut pos = min_match as u32;
     for candidate in candidates {
         let end = candidate.length.min(max_reach);
+        if pos > end {
+            continue;
+        }
+        // C calls ZSTD_getMatchPrice per length; the offset is the same at
+        // every one of them, so its share is paid here instead.
+        let candidate_price = base_price + price_model.offset_price(candidate.offset_value);
         while pos <= end {
             let idx = pos as usize;
             debug_assert!(idx <= horizon && idx < nodes.len());
-            let price = base_price + price_model.match_price(candidate.offset_value, pos);
+            let price = candidate_price + price_model.match_length_price(pos);
             unsafe {
                 let node = nodes.get_unchecked_mut(idx);
                 node.price = price;
@@ -1795,10 +1852,13 @@ pub(crate) fn update_optimal_match_nodes<const IS_ULTRA: bool>(
         // Scan downward: from max_length down to previous_length+1.
         let start_ml = previous_length + 1;
         let mut ml = max_length;
+        // C calls ZSTD_getMatchPrice per length; the offset is the same at
+        // every one of them, so its share is paid here instead.
+        let candidate_price = base_price + price_model.offset_price(candidate.offset_value);
         while ml >= start_ml {
             let pos = cur + ml as usize;
             debug_assert!(pos <= horizon && pos < nodes.len());
-            let price = base_price + price_model.match_price(candidate.offset_value, ml);
+            let price = candidate_price + price_model.match_length_price(ml);
             // C lines 1318-1326: when pos extends beyond the frontier,
             // gap-fill intermediate positions with MAX_PRICE sentinel.
             // SAFETY: pos = cur + ml where ml <= max_reach = horizon - cur,
