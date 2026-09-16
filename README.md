@@ -22,10 +22,10 @@ This crate is an independent implementation. It is not affiliated with Meta or w
 ## Compared with upstream `zstd`
 
 <div align="center">
-<img src="assets/benchmarks.svg" alt="Two charts across compression levels 1 to 22. Left: compressed size versus upstream zstd, identical at every level, with a band showing corpora where zstandard emits up to 26 percent less. Right: encode and decode throughput as a percentage of upstream, both close to the parity line." width="880">
+<img src="assets/benchmarks.svg" alt="Two charts across compression levels 1 to 22. Left: compressed size versus upstream zstd, identical at every level, with a band showing corpora where zstandard emits up to 26 percent less. Right: encode and decode throughput as a percentage of upstream, decode near parity and encode rising above it at the top levels." width="880">
 </div>
 
-Compressed size is the headline. Across 11 corpora at every level, the median row is byte-identical to upstream, the best is 26% smaller, and the worst is 0.08% larger. Encode is at parity on the median row and its per-level median stays within 5% of upstream at every level; decode sits at 98.4% across every row, easing to about 93% at the top levels. What is left is corpus-specific rather than broad: the dictionary cases run at 0.65-0.82x through levels 4 to 10, and that prefixed-parser band is the largest performance gap still open.
+Compressed size is the headline. Across 11 corpora at every level, the median row is byte-identical to upstream, the best is 26% smaller, and the worst is 0.08% larger. Encode is slightly ahead on the median row at 103%, with its per-level median running from 94% in the middle levels to 117% at the top, where the optimal parser does the work; decode sits at 98.6% across every row, easing to about 93% at the top levels. What is left is corpus-specific rather than broad: the dictionary cases run at 0.67-0.82x through levels 4 to 10, and that prefixed-parser band is the largest performance gap still open.
 
 The corpora are generated fixtures, so their absolute compression ratios describe the generator rather than any real workload. What transfers is the comparison, measured on identical bytes against the revision pinned in `upstream-zstd.ref`. Per-level tables, including streaming and dictionary cases, are in [BENCHMARKS.md](BENCHMARKS.md); the chart is generated from it by `python3 scripts/plot_benchmarks.py` and is stamped with the revision it was measured at.
 

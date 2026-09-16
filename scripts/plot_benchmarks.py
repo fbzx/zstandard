@@ -120,6 +120,82 @@ class Panel:
         return f"{top} {bottom} Z"
 
 
+# "parity with zstd" set in the `note` style, measured off a render rather than
+# guessed: the glyphs span 86px, reach 8.8px above the baseline and 2.5px below.
+PARITY_LABEL = (86.0, 8.8, 2.5)
+
+
+def parity_label(panel: Panel, lines: list[dict[int, float]], margin: float = 3.0) -> tuple[float, float, str]:
+    """Place the parity-line label where the series leave room for it.
+
+    Returns the text's x, its baseline y, and the class suffix that sets its
+    anchor. The label wants to touch the line it names, so the search starts
+    against the line and steps away from it, at both ends and on both sides,
+    taking the first placement that clears every series by `margin`. That makes
+    distance from the line the thing being minimized, which is what keeps the
+    label reading as a caption for it. If the panel is too crowded for any
+    placement to clear, the roomiest one wins so the text is merely close to a
+    series rather than struck through by one.
+    """
+    width, cap, descender = PARITY_LABEL
+    parity_y = panel.py(100.0)
+    # Left before right and above before below, so that among placements the
+    # same distance from the line the label keeps the corner it has always used.
+    ends = (
+        ("", panel.x + 6.0, panel.x + 6.0),
+        (" end", panel.x + panel.w - 4.0, panel.x + panel.w - 4.0 - width),
+    )
+    fallback = (float("-inf"), panel.x + 6.0, parity_y - 9.0, "")
+    for half_pixel in range(8, 2 * int(panel.h) + 1):
+        offset = half_pixel / 2.0
+        for anchor, x, left in ends:
+            for above in (True, False):
+                baseline = parity_y - offset - descender if above else parity_y + offset + cap
+                if baseline - cap < panel.y or baseline + descender > panel.y + panel.h:
+                    continue
+                clear = _clearance(panel, lines, left, left + width, baseline - cap, baseline + descender)
+                if clear >= margin:
+                    return x, baseline, anchor
+                if clear > fallback[0]:
+                    fallback = (clear, x, baseline, anchor)
+    return fallback[1], fallback[2], fallback[3]
+
+
+def _clearance(panel: Panel, lines: list[dict[int, float]], x0: float, x1: float, top: float, bottom: float) -> float:
+    """Smallest vertical distance from any series to the box, negative if inside.
+
+    The series are polylines, so this samples them across the box's horizontal
+    span rather than looking only at the levels that happen to fall inside it:
+    a segment can cut a corner of the box without either of its endpoints
+    landing there.
+    """
+    worst = float("inf")
+    for points in lines:
+        xs = sorted((panel.px(level), value) for level, value in points.items())
+        for step in range(41):
+            x = x0 + (x1 - x0) * step / 40.0
+            y = panel.py(_interpolate(xs, x))
+            if y < top:
+                worst = min(worst, top - y)
+            elif y > bottom:
+                worst = min(worst, y - bottom)
+            else:
+                worst = min(worst, -min(y - top, bottom - y))
+    return worst
+
+
+def _interpolate(xs: list[tuple[float, float]], x: float) -> float:
+    """The polyline's value at `x`, flat outside the ends."""
+    if x <= xs[0][0]:
+        return xs[0][1]
+    if x >= xs[-1][0]:
+        return xs[-1][1]
+    for (xa, ya), (xb, yb) in zip(xs, xs[1:]):
+        if xa <= x <= xb:
+            return ya if xb == xa else ya + (yb - ya) * (x - xa) / (xb - xa)
+    return xs[-1][1]
+
+
 def axes(panel: Panel, ticks: list[float], fmt: str, title: str, subtitle: str) -> list[str]:
     # The two panels run in opposite directions -- fewer bytes is a win, fewer
     # MiB/s is not -- so each says which way is good rather than leaving the
@@ -188,12 +264,16 @@ def render(data: dict[str, dict[int, tuple[float, float, float]]], settings: dic
         "higher is better &#8212; percentage of upstream on the same bytes",
     )
     body.append(f'<line x1="{speed.x}" y1="{speed.py(100):.1f}" x2="{speed.x + speed.w}" y2="{speed.py(100):.1f}" class="parity"/>')
-    # Left of the panel, not right. The encode median now rises above 100% at
-    # both ends -- levels 1-2 and again from level 10 -- so the band just above
-    # the parity line is never wholly clear; at the left edge the encode line
-    # sits far enough above it to leave this label its own gap, and at the right
-    # it does not.
-    body.append(f'<text x="{speed.x + 6}" y="{speed.py(100) - 9:.1f}" class="note">parity with zstd</text>')
+    # Which corner this label can sit in depends on the sweep. It was pinned to
+    # the upper left with a comment arguing that corner stays clear; an optimal
+    # parser change then lifted encode above 110% at the top levels and dropped
+    # it through the label at level 3, and both series crossed the text. A
+    # hardcoded corner is a claim about data the chart has not seen yet, so ask
+    # the data instead.
+    label_x, label_y, label_anchor = parity_label(
+        speed, [{k: v[0] for k, v in data["encode"].items()}, {k: v[0] for k, v in data["decode"].items()}]
+    )
+    body.append(f'<text x="{label_x:.1f}" y="{label_y:.1f}" class="note{label_anchor}">parity with zstd</text>')
     body.append(f'<path d="{speed.line({k: v[0] for k, v in data["encode"].items()})}" class="lineA"/>')
     body.append(f'<path d="{speed.line({k: v[0] for k, v in data["decode"].items()})}" class="lineB"/>')
 
@@ -219,7 +299,7 @@ def render(data: dict[str, dict[int, tuple[float, float, float]]], settings: dic
 
     return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}" role="img" aria-label="Compressed size and throughput compared with upstream zstd across compression levels 1 to 22">
   <title>zstandard versus upstream zstd</title>
-  <desc>Left: compressed size relative to upstream, which is identical at every level with a band showing corpora where zstandard emits less. Right: encode and decode throughput as a percentage of upstream, both near parity.</desc>
+  <desc>Left: compressed size relative to upstream, which is identical at every level with a band showing corpora where zstandard emits less. Right: encode and decode throughput as a percentage of upstream, decode near parity and encode rising above it at the top levels.</desc>
   <defs>
     <style>
       /* Generated by scripts/plot_benchmarks.py -- do not edit by hand.
