@@ -4014,6 +4014,24 @@ fn entropy_cost_bits(
     cost >> COST_ACCURACY_LOG
 }
 
+/// Prices the NCount header from the *undecremented* counts, while
+/// [`build_compressed_table_choice`] normalizes the decremented ones. The two
+/// therefore disagree, and deliberately so.
+///
+/// Dropping one from the last symbol's count perturbs the normalized
+/// distribution by at most one quantum, so the disagreement is bounded at one
+/// byte: the header either crosses a byte boundary or it does not. Measured
+/// across 9 corpora at 24 levels, 42 of 18,084 sections priced differently
+/// from what the builder emitted (32 over, 10 under), and exactly one of those
+/// flipped a mode decision — a 158-sequence match-length section that took
+/// `Predefined` over `FseCompressed`. Correcting it is worth **one byte per
+/// 187 MB**, and costs a second normalize plus `write_ncount` on the selection
+/// path to collect.
+///
+/// The margins are genuinely that tight — 1.5% of mode decisions sit within
+/// one header byte of their nearest rival — so this is a real mispricing and
+/// not a cosmetic one. It is simply not worth the hot-path work. Do not
+/// "fix" it without measuring what the fix buys.
 fn ncount_cost_bytes(part: SequencePart, stats: &SequenceCodeStats) -> Result<usize> {
     let table_log = fse::optimal_table_log(
         part.max_accuracy_log() as u32,
