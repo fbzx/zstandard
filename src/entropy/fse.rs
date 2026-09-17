@@ -212,18 +212,20 @@ pub(crate) fn optimal_table_log(max_table_log: u32, src_size: usize, max_symbol_
     let src_size = src_size.max(2);
     let max_table_log = max_table_log.clamp(MIN_TABLELOG as u32, TABLELOG_MAX as u32);
     let max_bits_src = highbit32((src_size - 1) as u32).saturating_sub(2);
+    let min_bits_src = highbit32(src_size as u32) + 1;
     let min_bits_symbols = if max_symbol_value == 0 {
         1
     } else {
         highbit32(max_symbol_value) + 2
     };
+    let min_bits = min_bits_src.min(min_bits_symbols);
 
     let mut table_log = max_table_log;
     if max_bits_src < table_log {
         table_log = max_bits_src.max(MIN_TABLELOG as u32);
     }
-    if min_bits_symbols > table_log {
-        table_log = min_bits_symbols.min(max_table_log);
+    if min_bits > table_log {
+        table_log = min_bits.min(max_table_log);
     }
     table_log.clamp(MIN_TABLELOG as u32, max_table_log)
 }

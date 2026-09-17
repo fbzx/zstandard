@@ -4512,6 +4512,11 @@ fn build_compressed_table_choice(
         return Ok(None);
     }
 
+    let table_log = fse::optimal_table_log(
+        part.max_accuracy_log() as u32,
+        codes.len(),
+        stats.max_symbol.into(),
+    );
     let mut effective_counts = stats.counts;
     let last_symbol = *codes.last().ok_or(Error::UnexpectedEof)? as usize;
     let mut effective_total = codes.len();
@@ -4522,12 +4527,6 @@ fn build_compressed_table_choice(
     if effective_total <= 1 {
         return Ok(None);
     }
-
-    let table_log = fse::optimal_table_log(
-        part.max_accuracy_log() as u32,
-        effective_total,
-        stats.max_symbol.into(),
-    );
     let mut normalized = [0i16; fse::SYMBOLVALUE_MAX + 1];
     if fse::normalize_count(
         &mut normalized,

@@ -123,7 +123,7 @@ const BLOCK: usize = 128 * 1024;
 /// improvement but is never automatic: it costs an edit here, and the edit is
 /// where somebody has to say which it was.
 ///
-/// Rows absent from this table are asserted byte-identical: 50 of the 81.
+/// Rows absent from this table are asserted byte-identical: 51 of the 81.
 ///
 /// **The `same-parse` rows are one divergence wearing seventeen hats.** Levels
 /// 5, 6 and 8 run the row match finder and level 13 runs btlazy2, and all four
@@ -146,7 +146,6 @@ const FIRST_BLOCK_AGREEMENT: &[(&str, i32, Agreement)] = &[
     ("log-lines", 8, Agreement::SameParseDifferentEncoding),
     ("log-lines", 13, Agreement::SameParseDifferentEncoding),
     ("mixed-entropy", 13, Agreement::SameParseDifferentEncoding),
-    ("mixed-entropy", 16, Agreement::DifferentParse),
     ("wikipedia", 6, Agreement::SameParseDifferentEncoding),
     ("wikipedia", 13, Agreement::SameParseDifferentEncoding),
     ("tabular-csv", 1, Agreement::DifferentParse),
