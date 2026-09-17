@@ -15,3 +15,7 @@ tmp/
 # see "The repcode substitution" in `docs/PARITY_PLAN.md`, which was extracted
 # from it for exactly that reason.
 /dev/HANDOFF.md
+
+# Agent worktrees. Scaffolding, not project configuration -- a tracked
+# `.claude/settings.json` is still welcome beside them.
+.claude/worktrees/
