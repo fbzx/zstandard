@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `io::Reader` decodes bulk reads 10 to 25% faster, with 50 to 65% fewer allocations and up to 58% less memory. Three costs went: the 128 KiB refill chunk was allocated and zeroed up front, which was most of what a short source paid, and is now taken lazily at 32 KiB and grown only when a refill fills it; `read_to_end` and `io::copy` went through the default `Read::read_to_end`, and now append straight from the decoder's buffer instead of bouncing through the chunk; and draining a finished frame in fixed pieces compacted the decoder's output buffer as it went, moving about one copy of the whole frame for bytes the caller was about to take.
+
 ### Fixed
 
 - Small sequence sections chose a wider FSE table log than their size justifies, spending an extra byte or two per section on the normalized-count header. The table log is now bounded by the sequence count as well as the symbol range, and is derived before the last symbol's count is decremented — which is what the encoder's own cost estimate already assumed. Frames shrink by up to 4 bytes on affected sections; no measured row grows.

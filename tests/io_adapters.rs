@@ -74,6 +74,32 @@ fn arbitrary_write_chunking_roundtrips() {
     }
 }
 
+/// Read boundaries must not change the output's meaning, including across
+/// concatenated frames.
+#[test]
+fn arbitrary_read_chunking_roundtrips() {
+    let first = corpus(200_000);
+    let second = corpus(300_000);
+    let mut stream = encode_all(&first).unwrap();
+    stream.extend_from_slice(&encode_all(&second).unwrap());
+    let mut expected = first;
+    expected.extend_from_slice(&second);
+
+    for chunk in [1, 7, 1024, 65_536, 300_000] {
+        let mut reader = Reader::new(&stream[..]);
+        let mut restored = Vec::new();
+        let mut buf = vec![0u8; chunk];
+        loop {
+            let n = reader.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            restored.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(restored, expected, "read chunk {chunk}");
+    }
+}
+
 /// A reader that hands back at most `limit` bytes per call, the way a socket
 /// or a pipe does.
 struct Trickle<'a> {
