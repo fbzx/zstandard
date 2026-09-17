@@ -208,17 +208,28 @@ const fn table_step(table_size: usize) -> usize {
     (table_size >> 1) + (table_size >> 3) + 3
 }
 
-pub(crate) fn optimal_table_log(max_table_log: u32, src_size: usize, max_symbol_value: u32) -> u32 {
-    let src_size = src_size.max(2);
-    let max_table_log = max_table_log.clamp(MIN_TABLELOG as u32, TABLELOG_MAX as u32);
-    let max_bits_src = highbit32((src_size - 1) as u32).saturating_sub(2);
-    let min_bits_src = highbit32(src_size as u32) + 1;
+/// The narrowest table log that can hold every symbol the counts can contain.
+///
+/// The `min` is what stops a wide alphabet from demanding a wide table on a
+/// short input: at most `src_size` distinct symbols can actually occur, so
+/// `min_bits_src` bounds what the alphabet is entitled to ask for. Either term
+/// alone guarantees `1 << result` is at least the number of distinct symbols,
+/// which is the property [`normalize_count`] relies on.
+fn min_table_log(src_size: usize, max_symbol_value: u32) -> u32 {
+    let min_bits_src = highbit32(src_size.max(2) as u32) + 1;
     let min_bits_symbols = if max_symbol_value == 0 {
         1
     } else {
         highbit32(max_symbol_value) + 2
     };
-    let min_bits = min_bits_src.min(min_bits_symbols);
+    min_bits_src.min(min_bits_symbols)
+}
+
+pub(crate) fn optimal_table_log(max_table_log: u32, src_size: usize, max_symbol_value: u32) -> u32 {
+    let src_size = src_size.max(2);
+    let max_table_log = max_table_log.clamp(MIN_TABLELOG as u32, TABLELOG_MAX as u32);
+    let max_bits_src = highbit32((src_size - 1) as u32).saturating_sub(2);
+    let min_bits = min_table_log(src_size, max_symbol_value);
 
     let mut table_log = max_table_log;
     if max_bits_src < table_log {
@@ -253,6 +264,17 @@ pub(crate) fn normalize_count(
     }
     if !(MIN_TABLELOG as u32..=TABLELOG_MAX as u32).contains(&table_log) {
         return Err(Error::TableLogTooLarge);
+    }
+    // C's guard at `fse_compress.c:473`, which this crate had omitted. A table
+    // log below the floor reaches `normalize_count_m2`, where `(1 << table_log)
+    // - distributed` subtracts below zero as soon as the distinct symbols
+    // outnumber the table's slots: a panic in debug, a wrapped count in
+    // release. No caller reaches it today, because every caller's accuracy cap
+    // exceeds the `min_table_log` its inputs can produce -- but that is an
+    // assumption holding the invariant up rather than a check, and it is a
+    // tuning change away from being load-bearing.
+    if table_log < min_table_log(total, max_symbol_value) {
+        return Err(Error::Generic);
     }
     let low_prob_count = if use_low_prob_count { -1 } else { 1 };
     let scale = 62 - table_log;
@@ -1593,6 +1615,30 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, Error::TableLogTooLarge);
+    }
+
+    /// The floor guard exists to keep `normalize_count_m2` from subtracting
+    /// below zero, so the case worth pinning is the one that would.
+    ///
+    /// Forty symbols each seen once, into a table log of 5. Every count lands
+    /// at or under `low_threshold`, so m2 would mark all forty as distributed
+    /// and then evaluate `(1 << 5) - 40` — a panic in debug, a wrapped count
+    /// in release. `min_table_log` is 6 here, and the guard rejects first.
+    #[test]
+    fn rejects_a_table_log_below_the_floor_its_symbols_need() {
+        let mut counts = [0u32; SYMBOLVALUE_MAX + 1];
+        for count in counts.iter_mut().take(40) {
+            *count = 1;
+        }
+        let mut normalized = [0i16; SYMBOLVALUE_MAX + 1];
+
+        assert_eq!(min_table_log(40, 39), 6);
+        let err = normalize_count(&mut normalized, 5, &counts, 40, 39, false).unwrap_err();
+        assert_eq!(err, Error::Generic);
+
+        // And the guard is a floor, not a ceiling: the same counts normalize
+        // fine at the log it asked for.
+        assert!(normalize_count(&mut normalized, 6, &counts, 40, 39, false).is_ok());
     }
 
     #[test]
