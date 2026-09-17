@@ -9,8 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- FSE table log calculation could choose an unnecessarily large table log on small sequence sections with wide symbol codes. Upstream C bounds `minBits` by `highbit32(srcSize) + 1` in addition to the symbol alphabet bound, which this crate omitted; sections with ≤ 63 sequences and high max codes emitted 1–2 extra header bits for the normalized distribution. Restoring the input-size bound shrinks compressed frames by up to 4 bytes on such sections with no change to larger inputs.
-- Sequence FSE table log is now derived from total sequences before decrementing the last symbol, matching upstream C (`zstd_compress_sequences.c:270-273`). `build_compressed_table_choice` previously computed `optimal_table_log` after decrementing `effective_total`, diverging by 1 bit on boundary counts ($2^k + 1$) from both upstream C and internal cost estimation (`ncount_cost_bytes` and `estimate_fse_code_cost_bits`).
+- Small sequence sections chose a wider FSE table log than their size justifies, spending an extra byte or two per section on the normalized-count header. The table log is now bounded by the sequence count as well as the symbol range, and is derived before the last symbol's count is decremented — which is what the encoder's own cost estimate already assumed. Frames shrink by up to 4 bytes on affected sections; no measured row grows.
 
 ## [0.1.7] - 2026-09-16
 
