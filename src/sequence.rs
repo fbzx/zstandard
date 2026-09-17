@@ -4032,6 +4032,27 @@ fn entropy_cost_bits(
 /// one header byte of their nearest rival — so this is a real mispricing and
 /// not a cosmetic one. It is simply not worth the hot-path work. Do not
 /// "fix" it without measuring what the fix buys.
+///
+/// The block splitter was checked separately and also holds. This function
+/// feeds [`estimate_part_cost`], and through it `derive_splits_recursive` in
+/// `src/encode.rs`, whose test is `left + right < whole` — *not* common-mode,
+/// since the left-and-right side carries six header estimates against whole's
+/// three, so the error accumulates asymmetrically rather than cancelling.
+/// Repricing this call site alone across 9 corpora at levels 13-22, at 1, 4
+/// and 8 MiB — 18,347 split decisions — left the number of splits taken
+/// identical at every size and every output row byte-identical.
+///
+/// That is a measured zero, not an impossibility, and the margins here are
+/// *tighter* than at mode selection: 3.4% of split decisions sit within one
+/// header byte, and the minimum margin is 0. Repricing visibly moves the
+/// surface without crossing a sign boundary — one decision crossed the 8-bit
+/// band at 4 MiB and one crossed back at 8 MiB. Anything that changes a cost
+/// input to the splitter deserves the same check.
+///
+/// One more of the same family, unmeasured: `use_low_prob_count` is read here
+/// from `stats.total >= 2048` and in the builder from `effective_total >=
+/// 2048`, so the two disagree only when a section holds exactly 2,048
+/// sequences.
 fn ncount_cost_bytes(part: SequencePart, stats: &SequenceCodeStats) -> Result<usize> {
     let table_log = fse::optimal_table_log(
         part.max_accuracy_log() as u32,

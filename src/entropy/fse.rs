@@ -225,6 +225,31 @@ fn min_table_log(src_size: usize, max_symbol_value: u32) -> u32 {
     min_bits_src.min(min_bits_symbols)
 }
 
+/// One closed-form guess, deliberately, where `huff0` searches.
+///
+/// [`huff0::TableDepth::Searched`](crate::entropy::huff0) builds the literals
+/// tree at every candidate depth and keeps the smallest header-plus-payload
+/// total. Giving the sequence tables the same treatment was measured on
+/// 2026-09-17 and rejected: a brute-force argmin over every legal table log,
+/// costed on true `write_ncount` bytes plus exact payload bits, saves **3,988
+/// bytes of 107,278,123** across 9 corpora at 14 levels. That is 0.0037%, and
+/// it is the *oracle* — a perfect chooser at zero search cost.
+///
+/// The shape of the win is why no implementation recovers it. The median is 4
+/// bits; the top 100 of ~4,100 suboptimal sections are 17% of the total; 4 of
+/// 9 corpora save nothing; 56% of sections already land on the optimum. It is
+/// also not separable from mode selection — a greedy per-section argmin
+/// *regressed* a row even as an oracle, because the table log feeds the
+/// compressed-vs-repeat-vs-basic choice downstream.
+///
+/// Two things a future search must know. Sections of 63 sequences or fewer
+/// have no room in either direction (108 of 108 already optimal), because
+/// `max_bits_src` is small there and this function returns [`min_table_log`]
+/// itself — the chosen log *is* the floor. And the error is not one-sided:
+/// 1,891 sections want a lower log but 2,346 want a *higher* one, so
+/// `max_bits_src` withholds accuracy more often than the cap over-constrains.
+///
+/// Do not build the search without re-measuring that ceiling.
 pub(crate) fn optimal_table_log(max_table_log: u32, src_size: usize, max_symbol_value: u32) -> u32 {
     let src_size = src_size.max(2);
     let max_table_log = max_table_log.clamp(MIN_TABLELOG as u32, TABLELOG_MAX as u32);
