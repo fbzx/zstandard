@@ -1416,34 +1416,33 @@ fn streaming_decode_of_a_window_filling_frame_is_not_quadratic() {
 /// Level 13 is the cheapest level that uses a binary tree, which is where the
 /// rebuild hurt most, and its tables are small enough that allocating them does
 /// not swamp the smaller of the two measurements.
+///
+/// The sizes are chosen in *time* rather than in bytes, which is what keeps
+/// this off the flaky list. A shared runner stalls for a roughly fixed number
+/// of milliseconds at a time, and a stall lands undivided in whichever
+/// measurement it hits, so what decides the outcome is not how big the inputs
+/// are but how long a stall is next to them. At the 1 MiB and 4 MiB this used
+/// to pin, a macOS runner measured 23 ms and 250 ms where 100 ms was expected:
+/// one stall of about 150 ms, read as a factor of 10.8, failing a bound of 9.
+/// The same stall against the 4 MiB denominator below reads as 6.5 and passes.
+///
+/// So the denominator grows until it clears [`FLOOR`], and the input grows with
+/// it. Sizing it this way rather than hard-coding a bigger number is what keeps
+/// a slow target cheap: under wasmtime the first size already takes longer than
+/// the floor, so it stops there and pays what it always paid, while a fast but
+/// noisy runner grows until its measurement is worth dividing. Either way the
+/// cost is bounded by the floor rather than by a byte count tuned to whichever
+/// machine last failed.
 #[test]
 fn streaming_encode_time_grows_linearly_with_frame_length() {
-    const SMALL: usize = 1 << 20;
-    const LARGE: usize = 4 << 20;
-
-    let mut body = Vec::with_capacity(LARGE);
-    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
-    let mut n = 0u64;
-    while body.len() < LARGE {
-        body.extend_from_slice(
-            format!(
-                "2026-07-27T12:00:{:02}Z seq={n} path=/api/v1/items status=200\n",
-                n % 60
-            )
-            .as_bytes(),
-        );
-        n += 1;
-        // Filler so the parser has to search rather than ride one long match.
-        if n.is_multiple_of(9) {
-            for _ in 0..16 {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                body.push((state >> 24) as u8);
-            }
-        }
-    }
-    body.truncate(LARGE);
+    /// Where the denominator starts, and the most it will grow to. The cap
+    /// bounds the test on a fast machine, which would otherwise keep doubling
+    /// to reach a floor it is too quick to ever hit.
+    const MIN_SMALL: usize = 1 << 20;
+    const MAX_SMALL: usize = 4 << 20;
+    /// Long enough that a runner's stall is a fraction of the measurement
+    /// rather than a multiple of it.
+    const FLOOR: std::time::Duration = std::time::Duration::from_millis(80);
 
     let options = EncoderOptions {
         compression_level: CompressionLevel::try_new(13).unwrap(),
@@ -1461,6 +1460,18 @@ fn streaming_encode_time_grows_linearly_with_frame_length() {
         started.elapsed()
     };
 
+    // One encode per candidate size, on a body no larger than the largest
+    // candidate. A quadratic encoder makes this loop stop earlier rather than
+    // later, which only shrinks the inputs the assertion below then runs on --
+    // it cannot turn a quadratic into a passing ratio.
+    let probe = linear_growth_body(MAX_SMALL);
+    let mut small_len = MIN_SMALL;
+    while small_len < MAX_SMALL && encode(&probe[..small_len]) < FLOOR {
+        small_len *= 2;
+    }
+    let large_len = small_len * 4;
+    let body = linear_growth_body(large_len);
+
     // Take the fastest of a few interleaved rounds rather than one shot each.
     // `cargo test` runs the test binaries concurrently, so a single pair of
     // measurements can catch this test while another binary owns the cores,
@@ -1471,16 +1482,48 @@ fn streaming_encode_time_grows_linearly_with_frame_length() {
     let mut small = std::time::Duration::MAX;
     let mut large = std::time::Duration::MAX;
     for _ in 0..ROUNDS {
-        small = small.min(encode(&body[..SMALL]));
+        small = small.min(encode(&body[..small_len]));
         large = large.min(encode(&body));
     }
     let growth = large.as_secs_f64() / small.as_secs_f64();
 
     assert!(
         growth < 9.0,
-        "encoding {LARGE} bytes took {large:?} against {small:?} for {SMALL}, a factor of \
-         {growth:.1} for four times the input; the per-block match finder rebuild is back"
+        "encoding {large_len} bytes took {large:?} against {small:?} for {small_len}, a factor \
+         of {growth:.1} for four times the input; the per-block match finder rebuild is back"
     );
+}
+
+/// Log-shaped lines with periodic incompressible filler, so the parser has to
+/// search rather than ride one long match.
+///
+/// Deterministic in `len`: a prefix of a longer body is byte for byte the body
+/// of that prefix's length, which is what lets the calibration above probe on
+/// one body and measure on another.
+fn linear_growth_body(len: usize) -> Vec<u8> {
+    let mut body = Vec::with_capacity(len);
+    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut n = 0u64;
+    while body.len() < len {
+        body.extend_from_slice(
+            format!(
+                "2026-07-27T12:00:{:02}Z seq={n} path=/api/v1/items status=200\n",
+                n % 60
+            )
+            .as_bytes(),
+        );
+        n += 1;
+        if n.is_multiple_of(9) {
+            for _ in 0..16 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                body.push((state >> 24) as u8);
+            }
+        }
+    }
+    body.truncate(len);
+    body
 }
 
 #[test]
