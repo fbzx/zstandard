@@ -1196,9 +1196,8 @@ fn parser_strategy_from_upstream(
         }
         UpstreamStrategy::BinaryTreeLazy2 => ParserStrategy::BinaryTreeLazy2,
         UpstreamStrategy::BinaryTreeOpt => ParserStrategy::BinaryTreeOpt,
-        UpstreamStrategy::BinaryTreeUltra | UpstreamStrategy::BinaryTreeUltra2 => {
-            ParserStrategy::BinaryTreeUltra
-        }
+        UpstreamStrategy::BinaryTreeUltra => ParserStrategy::BinaryTreeUltra,
+        UpstreamStrategy::BinaryTreeUltra2 => ParserStrategy::BinaryTreeUltra2,
     }
 }
 
@@ -3626,10 +3625,10 @@ mod tests {
             (16, ParserStrategy::BinaryTreeOpt),
             (17, ParserStrategy::BinaryTreeOpt),
             (18, ParserStrategy::BinaryTreeUltra),
-            (19, ParserStrategy::BinaryTreeUltra),
-            (20, ParserStrategy::BinaryTreeUltra),
-            (21, ParserStrategy::BinaryTreeUltra),
-            (22, ParserStrategy::BinaryTreeUltra),
+            (19, ParserStrategy::BinaryTreeUltra2),
+            (20, ParserStrategy::BinaryTreeUltra2),
+            (21, ParserStrategy::BinaryTreeUltra2),
+            (22, ParserStrategy::BinaryTreeUltra2),
         ] {
             let level = CompressionLevel::try_new(level).unwrap();
             assert_eq!(
@@ -4171,6 +4170,16 @@ mod tests {
             128,
             125,
             ParserStrategy::BinaryTreeUltra
+        ));
+        assert!(compressed_literals_clear_minimum_gain(
+            256,
+            252,
+            ParserStrategy::BinaryTreeUltra2
+        ));
+        assert!(!compressed_literals_clear_minimum_gain(
+            256,
+            253,
+            ParserStrategy::BinaryTreeUltra2
         ));
     }
 
@@ -9424,6 +9433,7 @@ pub enum BlockTraceParserStrategy {
     BinaryTreeLazy2,
     BinaryTreeOpt,
     BinaryTreeUltra,
+    BinaryTreeUltra2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9682,6 +9692,7 @@ impl From<ParserStrategy> for BlockTraceParserStrategy {
             ParserStrategy::BinaryTreeLazy2 => Self::BinaryTreeLazy2,
             ParserStrategy::BinaryTreeOpt => Self::BinaryTreeOpt,
             ParserStrategy::BinaryTreeUltra => Self::BinaryTreeUltra,
+            ParserStrategy::BinaryTreeUltra2 => Self::BinaryTreeUltra2,
         }
     }
 }

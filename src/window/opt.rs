@@ -311,16 +311,18 @@ pub(crate) fn plan_sequences_binary_tree_without_prefix_from_into(
             finder,
             ldm,
         ),
-        ParserStrategy::BinaryTreeUltra => plan_sequences_optimal_without_prefix_into::<true>(
-            plan,
-            src,
-            block_start,
-            repeat_offsets,
-            params,
-            match_floor,
-            finder,
-            ldm,
-        ),
+        ParserStrategy::BinaryTreeUltra | ParserStrategy::BinaryTreeUltra2 => {
+            plan_sequences_optimal_without_prefix_into::<true>(
+                plan,
+                src,
+                block_start,
+                repeat_offsets,
+                params,
+                match_floor,
+                finder,
+                ldm,
+            )
+        }
         _ => {
             debug_assert!(
                 ldm.is_none(),
@@ -426,7 +428,9 @@ pub(crate) fn plan_sequences_binary_tree_with_prefix_chain_from_into(
     ldm: Option<&[RawSequence]>,
 ) -> Result<()> {
     match params.parser_strategy {
-        ParserStrategy::BinaryTreeOpt | ParserStrategy::BinaryTreeUltra => {
+        ParserStrategy::BinaryTreeOpt
+        | ParserStrategy::BinaryTreeUltra
+        | ParserStrategy::BinaryTreeUltra2 => {
             // C's byCopyingCDict path: dictMode = ZSTD_extDict, NO separate
             // dict match state (ms->dictMatchState = NULL), Phase 2 dict BST
             // search is SKIPPED. One unified BST with CDict params, dict
@@ -493,7 +497,10 @@ pub(crate) fn plan_sequences_binary_tree_with_prefix_chain_from_into(
                 plan.opt_dict_bt = Some(Arc::new(bt));
             }
             let dict_bt = plan.opt_dict_bt.as_ref().unwrap().clone();
-            let result = if matches!(params.parser_strategy, ParserStrategy::BinaryTreeUltra) {
+            let result = if matches!(
+                params.parser_strategy,
+                ParserStrategy::BinaryTreeUltra | ParserStrategy::BinaryTreeUltra2
+            ) {
                 plan_sequences_optimal_with_prefix_two_phase_into::<true>(
                     plan,
                     src,

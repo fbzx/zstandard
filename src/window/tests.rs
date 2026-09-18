@@ -2891,6 +2891,7 @@ fn only_the_tagged_strategies_gate_reuse_on_the_entry_width() {
         ParserStrategy::BinaryTreeLazy2,
         ParserStrategy::BinaryTreeOpt,
         ParserStrategy::BinaryTreeUltra,
+        ParserStrategy::BinaryTreeUltra2,
     ] {
         let params = MatchFinderParameters {
             parser_strategy: strategy,

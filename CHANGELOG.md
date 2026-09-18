@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - The Huffman table log search at the highest levels (btultra2) covered a narrower range than upstream's -- it never went below table log 5 and narrowed its ceiling by input size before searching. It now covers the same range upstream does. Frames at these levels usually shrink or stay the same size; a few cases where the narrower search previously landed on upstream's exact answer by chance now differ by a byte or two instead, in either direction.
+- Level 19 and up on inputs over 256 KiB, and the btultra2 strategy wherever a level selects it, demanded twice the gain upstream does before a compressed literals section or a compressed block was worth writing: the minimum is `srcSize >> 8` there, and this crate used `srcSize >> 7` because its parser did not distinguish btultra2 from btultra. Literals that compress by less than 0.8% now go out compressed at those levels, as upstream's do. No benchmark corpus row changes; on a body of near-incompressible literals at level 19, nineteen of 119 blocks that went raw now compress and the frame comes out 4 bytes under upstream where it was 3,641 over.
 
 ## [0.1.8] - 2026-09-17
 
