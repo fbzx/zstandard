@@ -2281,6 +2281,11 @@ pub(crate) fn plan_sequences_optimal_without_prefix_into<const IS_ULTRA: bool>(
                         horizon,
                         min_match,
                     );
+                    // The frontier's neighbour is what the one-literal extension
+                    // above compares against, and `last_pos` has just moved.
+                    if last_pos < horizon {
+                        nodes[last_pos + 1].price = MAX_PRICE;
+                    }
                 }
             }
             cur += 1;
@@ -2650,6 +2655,9 @@ pub(crate) fn plan_sequences_optimal_with_prefix_into<const IS_ULTRA: bool>(
                         horizon,
                         min_match,
                     );
+                    if last_pos < horizon {
+                        nodes[last_pos + 1].price = MAX_PRICE;
+                    }
                 }
             }
             cur += 1;
@@ -3091,6 +3099,9 @@ pub(crate) fn plan_sequences_optimal_with_prefix_two_phase_into<const IS_ULTRA: 
                         horizon,
                         min_match,
                     );
+                    if last_pos < horizon {
+                        nodes[last_pos + 1].price = MAX_PRICE;
+                    }
                 }
             }
             cur += 1;

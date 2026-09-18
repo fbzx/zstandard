@@ -5526,12 +5526,10 @@ mod tests {
         // -- that level now runs 2.93% under upstream rather than 3 bytes over,
         // so the row cannot be a gap in either size or cause.
         //
-        // Same shape, and non-monotonic in size: 0 at 256 KiB, +38 at 512 KiB,
-        // +29 at 1 MiB. A single cause would not come and go like that.
-        ("tabular-csv", 19, 38),
-        ("tabular-csv", 20, 38),
-        ("tabular-csv", 21, 38),
-        ("tabular-csv", 22, 15),
+        // `("tabular-csv", 19..=21, 38)` and `("tabular-csv", 22, 15)` sat here
+        // until 2026-09-18, read as non-monotonic in size and so not one cause.
+        // It was one: the optimal parser's frontier sentinel was stale, so a
+        // segment could end where upstream's carried on.
         // These are all ties rather than divergences, and unlike the two cases
         // above they hold their size: every one stays within 0 to 2 bytes
         // across 256 KiB, 512 KiB and 1 MiB while the compressed output itself

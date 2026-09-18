@@ -153,8 +153,6 @@ const FIRST_BLOCK_AGREEMENT: &[(&str, i32, Agreement)] = &[
     ("tabular-csv", 6, Agreement::SameParseDifferentEncoding),
     ("tabular-csv", 8, Agreement::SameParseDifferentEncoding),
     ("tabular-csv", 13, Agreement::SameParseDifferentEncoding),
-    ("tabular-csv", 18, Agreement::DifferentParse),
-    ("tabular-csv", 22, Agreement::DifferentParse),
     // No parse to compare: the body is incompressible, so both sides emit a raw
     // first block at every level. Listed row by row rather than special-cased on
     // the corpus name, so that a level which *started* finding a compressed
@@ -174,20 +172,17 @@ const FIRST_BLOCK_AGREEMENT: &[(&str, i32, Agreement)] = &[
 /// sizes as measured. One-directional, like every size bound in this tree: a
 /// row that gets smaller than upstream is not a failure and is not listed.
 ///
-/// Three entries, all small, and the split between them is the useful part.
-/// `tabular-csv` at 22 is a btultra2 parse that diverges from upstream's in the
-/// very first block and lands 15 bytes worse on 68 KB. The two `mixed-entropy`
-/// rows are the opposite shape: their first block is byte-identical, so
-/// whatever costs those 9 bytes happens in a *later* block and this sweep
-/// cannot see it. That is the honest limit of a first-block comparator, and the
-/// reason the size bound here is taken on the whole frame.
+/// The two `mixed-entropy` rows have a byte-identical first block, so whatever
+/// costs those 9 bytes happens in a later block and this sweep cannot see it,
+/// which is why the size bound here is taken on the whole frame. The entries
+/// exist so that neither can grow silently.
 ///
-/// All three are under 0.03% and are recorded rather than chased. The entries
-/// exist so that none of them can grow silently.
+/// `("tabular-csv", 22, 68675, 68660)` sat here until 2026-09-18, a btultra2
+/// parse that diverged in the very first block. The optimal parser's frontier
+/// sentinel was stale, so its segment ended where upstream's carried on.
 const FIRST_BLOCK_SIZE_GAPS: &[(&str, i32, usize, usize)] = &[
     ("mixed-entropy", 18, 172476, 172467),
     ("mixed-entropy", 22, 172477, 172468),
-    ("tabular-csv", 22, 68675, 68660),
 ];
 
 fn agreement_record() -> BTreeMap<(&'static str, i32), Agreement> {

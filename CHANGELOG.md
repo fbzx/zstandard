@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The optimal parser (levels 16 and up on large inputs) could end a parse segment one position early. Upstream resets the node just past the parse frontier to the maximum price after every position it prices, so its check of whether a match plus one literal is cheaper than a run of literals at the frontier compares against nothing; this crate reset that node only when a segment began, and once the frontier moved the node held a price from an earlier segment, which could reject the extension and close the segment. Every block now parses as upstream's does where it did not before: `tabular-csv` is byte-identical to upstream at every optimal level at 512 KiB, where it was 38 bytes over at 19 through 21 and 15 over at 22, and within 20 bytes at 4 MiB. `trained-dictionary` at 4 MiB moves the other way, from 12% under upstream at levels 17 through 22 to byte-identical with it: the early segment end had, on that input, been producing a better parse than upstream's own.
+
 ## [0.1.8] - 2026-09-17
 
 ### Changed

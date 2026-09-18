@@ -5112,16 +5112,16 @@ fn a_window_the_body_outgrows_keeps_the_tree_upstreams() {
     );
 
     // The bound above is one-directional, so it cannot notice the parse
-    // drifting as long as the frames stay small. This is the other half: 91 of
+    // drifting as long as the frames stay small. This is the other half: 109 of
     // the 132 rows are upstream's exact bytes, and losing them would mean
     // something moved even though nothing got bigger.
     //
-    // The 41 that differ are almost all in this crate's favour and none is
+    // The 23 that differ are almost all in this crate's favour and none is
     // large -- the worst overshoot in the whole grid is 210 bytes on 161 KB,
     // 0.13%, against a bound of 1%. Before the insert floor was fixed the same
     // grid ran to 10.93%.
     assert_eq!(
-        identical, 91,
+        identical, 109,
         "the number of rows matching upstream byte for byte changed"
     );
 }
