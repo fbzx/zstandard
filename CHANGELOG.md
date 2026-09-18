@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The Huffman table log search at the highest levels (btultra2) covered a narrower range than upstream's -- it never went below table log 5 and narrowed its ceiling by input size before searching. It now covers the same range upstream does. Frames at these levels usually shrink or stay the same size; a few cases where the narrower search previously landed on upstream's exact answer by chance now differ by a byte or two instead, in either direction.
+
 ## [0.1.8] - 2026-09-17
 
 ### Changed

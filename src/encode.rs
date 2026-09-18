@@ -5544,13 +5544,32 @@ mod tests {
         // different table of the same cost, and the byte it is worth lands on
         // whichever levels happen to tie. L9 and L10 closed and L17 opened;
         // the total across the sweep went down by one byte.
+        //
+        // `("raw-dictionary", 17, 1)` sat here until 2026-09-18 as one of the
+        // sort_nodes ties above. It was not: `optimal_table_log_search` carried
+        // its own floor of 5 on the search's lower end and its own re-clamp of
+        // `max_table_log` by source size, neither of which `HUF_optimalTableLog`
+        // applies under `HUF_flags_optimalDepth`. Removing them let the search
+        // cover the same range C does, and L17's table now matches exactly.
+        //
+        // `("raw-dictionary", 18..=22, 2)` sat here until 2026-09-18, listed
+        // with the ties above. The table-log search fix above halved it to 1;
+        // see L16 below for why the remaining byte is a different, separate tie.
+        //
+        // L16 and the five levels below it are one tie, confirmed by decoding
+        // both frames' full sequence streams rather than by size alone: every
+        // one splits the block's first sequence as two literal bytes and a
+        // 20-byte match where upstream takes one literal byte and a 21-byte
+        // match, same offset, and every sequence after it lines up exactly.
+        // L16 shows this identical split with or without the table-log search
+        // fix, so that fix only moved which levels land on the losing side of
+        // the tie -- it did not create it.
         ("raw-dictionary", 16, 1),
-        ("raw-dictionary", 17, 1),
-        ("raw-dictionary", 18, 2),
-        ("raw-dictionary", 19, 2),
-        ("raw-dictionary", 20, 2),
-        ("raw-dictionary", 21, 2),
-        ("raw-dictionary", 22, 2),
+        ("raw-dictionary", 18, 1),
+        ("raw-dictionary", 19, 1),
+        ("raw-dictionary", 20, 1),
+        ("raw-dictionary", 21, 1),
+        ("raw-dictionary", 22, 1),
     ];
 
     #[test]

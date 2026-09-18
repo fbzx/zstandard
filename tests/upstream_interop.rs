@@ -5112,16 +5112,16 @@ fn a_window_the_body_outgrows_keeps_the_tree_upstreams() {
     );
 
     // The bound above is one-directional, so it cannot notice the parse
-    // drifting as long as the frames stay small. This is the other half: 91 of
+    // drifting as long as the frames stay small. This is the other half: 98 of
     // the 132 rows are upstream's exact bytes, and losing them would mean
     // something moved even though nothing got bigger.
     //
-    // The 41 that differ are almost all in this crate's favour and none is
-    // large -- the worst overshoot in the whole grid is 210 bytes on 161 KB,
-    // 0.13%, against a bound of 1%. Before the insert floor was fixed the same
-    // grid ran to 10.93%.
+    // Of the 34 that differ, 17 (all `trained-dictionary`) are 2 bytes over,
+    // 0.02%, against a bound of 1%; the rest are in this crate's favour.
+    // Before the insert floor was fixed the same grid ran to 10.93% over;
+    // the table-log search fix (`src/entropy/huff0.rs`) closed 7 more rows.
     assert_eq!(
-        identical, 91,
+        identical, 98,
         "the number of rows matching upstream byte for byte changed"
     );
 }
@@ -5542,10 +5542,15 @@ const LDM_DICTIONARY_SIZE_GAPS: &[(&str, &str, &str, usize, usize)] = &[
     ("wikipedia", "6", "raw", 14608, 14603),
     ("wikipedia", "7", "raw", 12377, 12373),
     ("wikipedia", "7", "trained", 12143, 12139),
-    ("wikipedia", "8", "raw", 12209, 12207),
+    // `("wikipedia", "8", "raw", 12209, 12207)` sat here until 2026-09-18,
+    // closed by the table-log search fix in `KNOWN_UPSTREAM_SIZE_GAPS`
+    // (`src/encode.rs`).
     ("wikipedia", "8", "trained", 12049, 12047),
-    ("wikipedia", "9", "raw", 12578, 12576),
-    ("wikipedia", "9", "trained", 12389, 12387),
+    // L9 raw improved by the same fix (12578 -> 12577); L9 trained moved the
+    // other way (12389 -> 12390), the same boundary tie widening the search
+    // can land on either side of, seen directly on `raw-dictionary` there.
+    ("wikipedia", "9", "raw", 12577, 12576),
+    ("wikipedia", "9", "trained", 12390, 12387),
 ];
 
 /// Long-distance matching with a dictionary engages where upstream's does, and
