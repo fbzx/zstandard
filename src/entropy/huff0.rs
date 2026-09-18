@@ -1650,81 +1650,110 @@ pub(crate) fn estimate_literal_section_bytes(src: &[u8]) -> Option<usize> {
     Some(header_size + data_size + jump_table)
 }
 
-/// Like [`estimate_literal_section_bytes`], but also considers reusing a previous
-/// block's Huffman table (repeat mode). Matches C's `ZSTD_buildBlockEntropyStats_literals`
-/// + `ZSTD_estimateBlockSize_literal` pipeline used during block-split cost estimation.
+/// Upstream's `ZSTD_buildBlockEntropyStats_literals` choosing a section type,
+/// then `ZSTD_estimateBlockSize_literal` pricing it.
 ///
-/// When repeat mode is chosen (previous table produces better results), the Huffman
-/// description header is omitted from the estimate (zero cost), matching C's
-/// `writeLitEntropy = (hType == set_compressed)` logic.
-///
-/// When `previous` is `None` or invalid, behaves identically to
-/// [`estimate_literal_section_bytes`].
-pub(crate) fn estimate_literal_section_bytes_with_repeat(
+/// `set_basic` and `set_rle` come out without the section header they will
+/// carry on the wire. That is upstream's price, and the splitter only compares
+/// these numbers against each other.
+pub(crate) fn estimate_literal_cost_bytes(
     src: &[u8],
     previous: Option<&CTableX1>,
-) -> Option<usize> {
-    if src.is_empty() {
-        return Some(0);
+    repeat_valid: bool,
+    table_depth: TableDepth,
+) -> usize {
+    let src_len = src.len();
+    if src_len == 0 {
+        return 0;
     }
+
+    // `COMPRESS_LITERALS_SIZE_MIN`.
+    let min_lit_size = if repeat_valid { 6 } else { 63 };
+    if src_len <= min_lit_size {
+        return src_len;
+    }
+
+    // A step that fails here fails in the encoder too, which then writes the
+    // section raw.
     let mut workspace = CompressWorkspace::default();
     let mut max_symbol_value = SYMBOLVALUE_MAX as u32;
-    let largest = count_wksp(
+    let Ok(largest) = count_wksp(
         &mut workspace.count,
         &mut max_symbol_value,
         src,
         &mut workspace.hist,
-    )
-    .ok()?;
-    // RLE: 1 byte
-    if largest as usize == src.len() {
-        return Some(1);
+    ) else {
+        return src_len;
+    };
+
+    if largest as usize == src_len {
+        return 1;
     }
-    // Incompressible: raw
-    if largest as usize <= (src.len() >> 7) + 4 {
-        return None;
+
+    // Upstream's "likely not compressible" heuristic.
+    if largest as usize <= (src_len >> 7) + 4 {
+        return src_len;
     }
-    // Validate previous table supports all symbols present in the data
+
+    let lit_header_bytes = 3 + (src_len >= 1024) as usize + (src_len >= 16384) as usize;
+    let jump_table = if src_len >= 256 { 6 } else { 0 };
+
+    // Not a table the encoder would reuse, so not one to price as reused.
     let previous = previous.filter(|table| {
         table.table_log > 0
             && validate_ctable_counts(&table.entries, &workspace.count, max_symbol_value)
     });
-    // Build new Huffman table
-    let huff_log = optimal_table_log(TABLELOG_DEFAULT as u32, src.len(), max_symbol_value);
-    let huff_log = build_ctable(
+
+    let huff_log = match table_depth {
+        TableDepth::Estimated => {
+            optimal_table_log(TABLELOG_DEFAULT as u32, src_len, max_symbol_value)
+        }
+        TableDepth::Searched => optimal_table_log_search(
+            TABLELOG_DEFAULT as u32,
+            &workspace.count,
+            max_symbol_value,
+            src_len,
+        ),
+    };
+
+    let Ok(huff_log) = build_ctable(
         &mut workspace.ctable,
         &workspace.count,
         max_symbol_value,
         huff_log,
         &mut workspace.build,
-    )
-    .ok()?;
-    // Header size for new table
-    let header_size = write_ctable(
+    ) else {
+        return src_len;
+    };
+
+    let Ok(header_size) = write_ctable(
         &mut [0u8; 256],
         &workspace.ctable,
         max_symbol_value,
         huff_log,
         &mut workspace.weights,
-    )
-    .ok()?;
-    // Data cost with new table
+    ) else {
+        return src_len;
+    };
+
     let new_data_size =
         estimate_compressed_size(&workspace.ctable, &workspace.count, max_symbol_value);
-    let jump_table = if src.len() >= 256 { 6 } else { 0 };
-    // Check repeat mode: can we reuse the previous table?
-    // C: if (oldCSize < srcSize && (oldCSize <= hSize + newCSize || hSize + 12 >= srcSize))
+
     if let Some(prev) = previous {
         let old_data_size =
             estimate_compressed_size(&prev.entries, &workspace.count, max_symbol_value);
-        if old_data_size < src.len()
-            && (old_data_size <= header_size + new_data_size || header_size + 12 >= src.len())
+        if old_data_size < src_len
+            && (old_data_size <= header_size + new_data_size || header_size + 12 >= src_len)
         {
-            // Repeat mode: no Huffman description header needed
-            return Some(old_data_size + jump_table);
+            return lit_header_bytes + old_data_size + jump_table;
         }
     }
-    Some(header_size + new_data_size + jump_table)
+
+    if header_size + new_data_size >= src_len {
+        return src_len;
+    }
+
+    lit_header_bytes + header_size + new_data_size + jump_table
 }
 
 /// Check that a Huffman CTable can encode all symbols with non-zero counts.
@@ -3551,5 +3580,100 @@ mod tests {
         let mut decoded = vec![0u8; raw.len()];
         decompress_4x_using_dtable(&mut decoded, &compressed[header..], &table).unwrap();
         assert_eq!(decoded, raw);
+    }
+
+    /// Stands in for the table a previous block would have left active.
+    fn ctable_for(src: &[u8]) -> CTableX1 {
+        let mut dst = vec![0u8; compress_bound(src.len())];
+        let mut workspace = CompressWorkspace::default();
+        compress_prefer_existing_table_into_mode(
+            &mut dst,
+            src,
+            None,
+            StreamMode::Four,
+            TableDepth::Estimated,
+            Compressibility::Unknown,
+            &mut workspace,
+        )
+        .expect("compression must not error")
+        .expect("this fixture compresses")
+        .table
+    }
+
+    /// One case per section type, priced the way upstream prices that type.
+    #[test]
+    fn literal_cost_estimation_matches_upstream_c_rules() {
+        let depth = TableDepth::Estimated;
+
+        assert_eq!(estimate_literal_cost_bytes(&[], None, false, depth), 0);
+
+        // set_rle
+        let rle = vec![b'x'; 200];
+        assert_eq!(estimate_literal_cost_bytes(&rle, None, false, depth), 1);
+
+        // set_basic, via `largest <= (srcSize >> 7) + 4`
+        let flat: Vec<u8> = (0..256u32).map(|i| i as u8).collect();
+        assert_eq!(estimate_literal_cost_bytes(&flat, None, false, depth), 256);
+
+        // set_compressed: cheaper than raw, and the price carries the 4-byte
+        // section header (>= 1 KiB) and the 6-byte jump table (>= 256 B) on top
+        // of the description and the coded data.
+        let text = english_like_bytes(4096);
+        let cost = estimate_literal_cost_bytes(&text, None, false, depth);
+        assert!(cost < text.len(), "english text must beat raw, got {cost}");
+        assert!(
+            cost > 4 + 6,
+            "a compressed section still pays header and jump table"
+        );
+    }
+
+    /// Holding the previous block's table is not having reused it, and only the
+    /// latter drops upstream's 63-byte gate to 6. Both directions are asserted:
+    /// a gate stuck at either value passes one half alone.
+    #[test]
+    fn only_a_reused_table_lowers_the_small_literal_gate() {
+        let table = ctable_for(&english_like_bytes(4096));
+        let run = vec![b'e'; 50];
+
+        assert_eq!(
+            estimate_literal_cost_bytes(&run, Some(&table), false, TableDepth::Estimated),
+            50,
+            "under HUF_repeat_check a 50-byte run is too small to analyse",
+        );
+        assert_eq!(
+            estimate_literal_cost_bytes(&run, Some(&table), true, TableDepth::Estimated),
+            1,
+            "under HUF_repeat_valid the same run is analysed and comes out RLE",
+        );
+    }
+
+    #[test]
+    fn reusing_the_previous_table_drops_the_description_from_the_price() {
+        let text = english_like_bytes(4096);
+        let table = ctable_for(&text);
+
+        let mut workspace = CompressWorkspace::default();
+        let mut max_symbol_value = SYMBOLVALUE_MAX as u32;
+        count_wksp(
+            &mut workspace.count,
+            &mut max_symbol_value,
+            &text,
+            &mut workspace.hist,
+        )
+        .expect("counting must not error");
+        let data_size =
+            estimate_compressed_size(&table.entries, &workspace.count, max_symbol_value);
+
+        // 3 + (>= 1 KiB) + (>= 16 KiB) section header, 6-byte jump table, no
+        // description.
+        let expected = 4 + 6 + data_size;
+        assert_eq!(
+            estimate_literal_cost_bytes(&text, Some(&table), true, TableDepth::Estimated),
+            expected,
+        );
+        assert!(
+            expected < estimate_literal_cost_bytes(&text, None, false, TableDepth::Estimated),
+            "reuse must beat describing the same table again",
+        );
     }
 }

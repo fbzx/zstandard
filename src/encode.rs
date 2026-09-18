@@ -11,8 +11,8 @@ use crate::{
     },
     outbuf::OutBuf,
     sequence::{
-        CompressionMode as SequenceCompressionMode, RepeatOffsets, SequenceCommand,
-        SequenceCompressionModes, SequenceEncodeScratch, SequenceEncodingState,
+        CompressionMode as SequenceCompressionMode, LiteralCostInputs, RepeatOffsets,
+        SequenceCommand, SequenceCompressionModes, SequenceEncodeScratch, SequenceEncodingState,
         SequenceSectionTimings, build_literal_offset_table,
         encode_prepared_seq_store_section_with_strategy_and_scratch_into_stats,
         encode_sequence_section_direct, estimate_subblock_cost_bits, offset_code,
@@ -5504,10 +5504,10 @@ mod tests {
     ///
     /// Two limits are worth stating, because both are places this table cannot
     /// see. It sweeps one corpus size, so a gap that only opens on a larger
-    /// input is invisible here: `binary-structured` L16 and L17 are +39 bytes
-    /// at 4 MiB in `BENCHMARKS.md` and exactly zero at the 512 KiB this test
-    /// uses. And it only measures the one-shot encoder, so streaming size
-    /// parity is unmeasured by anything that fails.
+    /// input is invisible here: `trained-dictionary` L16 is +2 bytes at 4 MiB
+    /// and exactly zero at the 512 KiB this test uses. And it only measures
+    /// the one-shot encoder, so streaming size parity is unmeasured by
+    /// anything that fails.
     const KNOWN_UPSTREAM_SIZE_GAPS: &[(&str, u8, isize)] = &[
         // Levels 18 and up on this case. The delta is not a fixed parse tie: it
         // is -7 at 256 KiB (we are smaller), +9 at 512 KiB, +51 at 1 MiB, and
@@ -5546,11 +5546,10 @@ mod tests {
         // the total across the sweep went down by one byte.
         ("raw-dictionary", 16, 1),
         ("raw-dictionary", 17, 1),
-        ("raw-dictionary", 18, 2),
-        ("raw-dictionary", 19, 2),
-        ("raw-dictionary", 20, 2),
-        ("raw-dictionary", 21, 2),
-        ("raw-dictionary", 22, 2),
+        // `("raw-dictionary", 18..=22, 2)` sat here until 2026-09-18, listed
+        // with the ties above. It was not one: the block splitter priced a
+        // sub-block's sequence tables below what the encoder writes, and took
+        // splits upstream does not. Those levels are now 9 bytes under.
     ];
 
     #[test]
@@ -9768,6 +9767,10 @@ impl LiteralsEncodingState {
     fn repeat_mode(self) -> LiteralsRepeatMode {
         self.repeat_mode
     }
+
+    fn repeat_is_valid(self) -> bool {
+        self.repeat_mode == LiteralsRepeatMode::Valid
+    }
 }
 
 #[derive(Default)]
@@ -11785,8 +11788,7 @@ fn find_post_sequence_splits(
     lit_offsets: &[usize],
     total_lit_len: usize,
     prev_seq_tables: Option<&SequenceEncodingState>,
-    prev_huf_table: Option<&huff0::CTableX1>,
-    literals_compression_disabled: bool,
+    literal_inputs: LiteralCostInputs<'_>,
 ) -> Vec<usize> {
     let seq_count = plan.sequences.len();
     let mut splits = Vec::with_capacity(POST_SPLIT_MAX_SPLITS + 2);
@@ -11798,8 +11800,7 @@ fn find_post_sequence_splits(
         lit_offsets,
         total_lit_len,
         prev_seq_tables,
-        prev_huf_table,
-        literals_compression_disabled,
+        literal_inputs,
     );
     // Build final partition table: [0, split1, ..., seq_count]
     splits.sort_unstable();
@@ -11818,8 +11819,7 @@ fn derive_splits_recursive(
     lit_offsets: &[usize],
     total_lit_len: usize,
     prev_seq_tables: Option<&SequenceEncodingState>,
-    prev_huf_table: Option<&huff0::CTableX1>,
-    literals_compression_disabled: bool,
+    literal_inputs: LiteralCostInputs<'_>,
 ) {
     if end - start < POST_SPLIT_MIN_SEQUENCES || splits.len() >= POST_SPLIT_MAX_SPLITS {
         return;
@@ -11833,8 +11833,7 @@ fn derive_splits_recursive(
         start,
         end,
         prev_seq_tables,
-        prev_huf_table,
-        literals_compression_disabled,
+        literal_inputs,
     );
     let left_cost = estimate_range_cost(
         plan,
@@ -11843,8 +11842,7 @@ fn derive_splits_recursive(
         start,
         mid,
         prev_seq_tables,
-        prev_huf_table,
-        literals_compression_disabled,
+        literal_inputs,
     );
     let right_cost = estimate_range_cost(
         plan,
@@ -11853,8 +11851,7 @@ fn derive_splits_recursive(
         mid,
         end,
         prev_seq_tables,
-        prev_huf_table,
-        literals_compression_disabled,
+        literal_inputs,
     );
 
     if left_cost + right_cost < whole_cost {
@@ -11866,8 +11863,7 @@ fn derive_splits_recursive(
             lit_offsets,
             total_lit_len,
             prev_seq_tables,
-            prev_huf_table,
-            literals_compression_disabled,
+            literal_inputs,
         );
         splits.push(mid);
         derive_splits_recursive(
@@ -11878,8 +11874,7 @@ fn derive_splits_recursive(
             lit_offsets,
             total_lit_len,
             prev_seq_tables,
-            prev_huf_table,
-            literals_compression_disabled,
+            literal_inputs,
         );
     }
 }
@@ -11891,8 +11886,7 @@ fn estimate_range_cost(
     start: usize,
     end: usize,
     prev_seq_tables: Option<&SequenceEncodingState>,
-    prev_huf_table: Option<&huff0::CTableX1>,
-    literals_compression_disabled: bool,
+    literal_inputs: LiteralCostInputs<'_>,
 ) -> u64 {
     let ll_codes = &plan.literal_codes[start..end];
     let of_codes = &plan.offset_codes[start..end];
@@ -11910,8 +11904,7 @@ fn estimate_range_cost(
         ml_codes,
         literals,
         prev_seq_tables,
-        prev_huf_table,
-        literals_compression_disabled,
+        literal_inputs,
     )
 }
 
@@ -12170,13 +12163,18 @@ pub(crate) fn encode_block_into_contiguous(
         scratch.planned_sequences.ensure_codes_populated();
         let lit_offsets = build_literal_offset_table(&scratch.planned_sequences.sequences);
         let total_lit_len = scratch.planned_sequences.literals.len();
+        let literal_inputs = LiteralCostInputs {
+            previous_table: literals_state.huffman_table(),
+            repeat_valid: literals_state.repeat_is_valid(),
+            compression_disabled: literals_state.compression_disabled,
+            table_depth: huffman_table_depth(params.match_finder.parser_strategy),
+        };
         let split_points = find_post_sequence_splits(
             &scratch.planned_sequences,
             &lit_offsets,
             total_lit_len,
             Some(sequence_tables),
-            literals_state.huffman_table(),
-            literals_state.compression_disabled,
+            literal_inputs,
         );
         if split_points.len() > 2 {
             // Multiple sub-blocks — encode via split path
@@ -12347,13 +12345,18 @@ pub(crate) fn encode_block_into_prefixed_contiguous(
         scratch.planned_sequences.ensure_codes_populated();
         let lit_offsets = build_literal_offset_table(&scratch.planned_sequences.sequences);
         let total_lit_len = scratch.planned_sequences.literals.len();
+        let literal_inputs = LiteralCostInputs {
+            previous_table: literals_state.huffman_table(),
+            repeat_valid: literals_state.repeat_is_valid(),
+            compression_disabled: literals_state.compression_disabled,
+            table_depth: huffman_table_depth(params.match_finder.parser_strategy),
+        };
         let split_points = find_post_sequence_splits(
             &scratch.planned_sequences,
             &lit_offsets,
             total_lit_len,
             Some(sequence_tables),
-            literals_state.huffman_table(),
-            literals_state.compression_disabled,
+            literal_inputs,
         );
         if split_points.len() > 2 {
             // Multiple sub-blocks — encode via split path

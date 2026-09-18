@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- The post-sequence block splitter priced a candidate sub-block's literals and sequence tables by rules of its own, each of them against splitting: it charged the literal section header on raw and RLE sections, never fell back to raw when a new Huffman description could not pay for itself, analysed short runs upstream declines to count, priced a shallower table than the btultra strategies then write, left a run-length coded sequence table's one-byte header uncharged, and priced a compressed sequence table from counts normalized without the last code decremented, which is not the table `ZSTD_buildCTable` produces. All of it now prices as upstream's estimator does. On the benchmark corpora at 4 MiB: `binary-structured` lands on upstream's exact size at every level from 16 through 22, where it was 5 to 39 bytes over; `tabular-csv` closes a smaller gap at level 17 and moves 4 to 20 bytes closer to upstream at 19 through 22; `trained-dictionary` closes a gap at level 16.
+
 ## [0.1.8] - 2026-09-17
 
 ### Changed

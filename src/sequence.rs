@@ -4016,7 +4016,8 @@ fn entropy_cost_bits(
 
 /// Prices the NCount header from the *undecremented* counts, while
 /// [`build_compressed_table_choice`] normalizes the decremented ones. The two
-/// therefore disagree, and deliberately so.
+/// therefore disagree, and deliberately so: upstream's `ZSTD_NCountCost`
+/// makes the same choice.
 ///
 /// Dropping one from the last symbol's count perturbs the normalized
 /// distribution by at most one quantum, so the disagreement is bounded at one
@@ -4033,26 +4034,10 @@ fn entropy_cost_bits(
 /// not a cosmetic one. It is simply not worth the hot-path work. Do not
 /// "fix" it without measuring what the fix buys.
 ///
-/// The block splitter was checked separately and also holds. This function
-/// feeds [`estimate_part_cost`], and through it `derive_splits_recursive` in
-/// `src/encode.rs`, whose test is `left + right < whole` — *not* common-mode,
-/// since the left-and-right side carries six header estimates against whole's
-/// three, so the error accumulates asymmetrically rather than cancelling.
-/// Repricing this call site alone across 9 corpora at levels 13-22, at 1, 4
-/// and 8 MiB — 18,347 split decisions — left the number of splits taken
-/// identical at every size and every output row byte-identical.
 ///
-/// That is a measured zero, not an impossibility, and the margins here are
-/// *tighter* than at mode selection: 3.4% of split decisions sit within one
-/// header byte, and the minimum margin is 0. Repricing visibly moves the
-/// surface without crossing a sign boundary — one decision crossed the 8-bit
-/// band at 4 MiB and one crossed back at 8 MiB. Anything that changes a cost
-/// input to the splitter deserves the same check.
-///
-/// One more of the same family, unmeasured: `use_low_prob_count` is read here
-/// from `stats.total >= 2048` and in the builder from `effective_total >=
-/// 2048`, so the two disagree only when a section holds exactly 2,048
-/// sequences.
+/// The block splitter does not read this price. Its candidates are priced by
+/// [`compressed_part_estimate`] from the decremented counts, the table
+/// `ZSTD_estimateBlockSize` prices with.
 fn ncount_cost_bytes(part: SequencePart, stats: &SequenceCodeStats) -> Result<usize> {
     let table_log = fse::optimal_table_log(
         part.max_accuracy_log() as u32,
@@ -4124,6 +4109,19 @@ pub(crate) fn build_literal_offset_table(sequences: &[SequenceCommand]) -> Vec<u
     offsets
 }
 
+/// What pricing a sub-block's literals needs from outside the sub-block.
+#[derive(Clone, Copy)]
+pub(crate) struct LiteralCostInputs<'a> {
+    pub(crate) previous_table: Option<&'a huff0::CTableX1>,
+    /// Upstream's `HUF_repeat_valid`. A block that built its own table leaves
+    /// `HUF_repeat_check`, so this is narrower than `previous_table.is_some()`.
+    pub(crate) repeat_valid: bool,
+    /// Upstream's `ZSTD_literalsCompressionIsDisabled`.
+    pub(crate) compression_disabled: bool,
+    /// Upstream's `HUF_flags_optimalDepth`.
+    pub(crate) table_depth: huff0::TableDepth,
+}
+
 /// Estimate the compressed size in bits for a sub-block defined by code slices
 /// and a literal byte slice. Used by the post-sequence block splitter to decide
 /// whether splitting improves compression. Matches C zstd's
@@ -4139,8 +4137,7 @@ pub(crate) fn estimate_subblock_cost_bits(
     match_codes: &[u8],
     literals: &[u8],
     prev_seq_tables: Option<&SequenceEncodingState>,
-    prev_huf_table: Option<&huff0::CTableX1>,
-    literals_compression_disabled: bool,
+    literal_inputs: LiteralCostInputs<'_>,
 ) -> u64 {
     let nb_seq = literal_codes.len();
     if nb_seq == 0 {
@@ -4160,16 +4157,19 @@ pub(crate) fn estimate_subblock_cost_bits(
         SequencePart::LiteralLength,
         &ll_stats,
         prev_seq_tables.and_then(|s| s.entry(SequencePart::LiteralLength)),
+        literal_codes[literal_codes.len() - 1],
     );
     let of_est = estimate_part_cost(
         SequencePart::Offset,
         &of_stats,
         prev_seq_tables.and_then(|s| s.entry(SequencePart::Offset)),
+        offset_codes[offset_codes.len() - 1],
     );
     let ml_est = estimate_part_cost(
         SequencePart::MatchLength,
         &ml_stats,
         prev_seq_tables.and_then(|s| s.entry(SequencePart::MatchLength)),
+        match_codes[match_codes.len() - 1],
     );
     // Per-symbol costs (byte-truncated per part) + FSE headers (exact bytes, added after)
     let seq_cost_bytes =
@@ -4191,7 +4191,7 @@ pub(crate) fn estimate_subblock_cost_bits(
     let lit_cost_bytes = if literals.is_empty() {
         0
     } else {
-        estimate_literal_cost_bytes(literals, prev_huf_table, literals_compression_disabled)
+        estimate_literal_cost_bytes(literals, literal_inputs)
     };
 
     // Block header: 3 bytes. Total in bytes (matching C's ZSTD_estimateBlockSize).
@@ -4207,7 +4207,8 @@ pub(crate) fn estimate_subblock_cost_bits(
 struct PartCostEstimate {
     /// Per-symbol FSE cost + extra bits, truncated to bytes per-part (>>3).
     symbol_cost_bytes: u64,
-    /// FSE NCount header bytes (non-zero only for set_compressed).
+    /// What the part's table description takes on the wire: the NCount for
+    /// `set_compressed`, the one symbol for `set_rle`.
     header_bytes: u64,
 }
 
@@ -4219,6 +4220,7 @@ fn estimate_part_cost(
     part: SequencePart,
     stats: &SequenceCodeStats,
     prev_state: Option<&SequenceEncodingPartState>,
+    last_code: u8,
 ) -> PartCostEstimate {
     if stats.total == 0 {
         return PartCostEstimate {
@@ -4240,7 +4242,6 @@ fn estimate_part_cost(
             .sum(),
     };
 
-    // RLE: just the extra bits (FSE symbol cost is 0). C: repeatMode = FSE_repeat_none.
     if stats.most_frequent == stats.total {
         // C: if (isDefaultAllowed && nbSeq <= 2) → set_basic, else → set_rle
         if part.default_allowed(stats.max_symbol) && stats.total <= 2 {
@@ -4254,7 +4255,7 @@ fn estimate_part_cost(
         }
         return PartCostEstimate {
             symbol_cost_bytes: total_extra_bits >> 3,
-            header_bytes: 0,
+            header_bytes: 1,
         };
     }
 
@@ -4325,100 +4326,96 @@ fn estimate_part_cost(
                 header_bytes: 0,
             }
         }
-        SelectedType::Compressed => {
-            // C: ZSTD_fseBitCost(fseCTable, countWksp, max) with the newly built CTable.
-            // We approximate with fse_normalized_cross_entropy_bits (close to fseBitCost).
-            let code_cost = estimate_fse_code_cost_bits(part, stats);
-            PartCostEstimate {
+        SelectedType::Compressed => match compressed_part_estimate(part, stats, last_code) {
+            Some((code_cost, header_bytes)) => PartCostEstimate {
                 symbol_cost_bytes: (code_cost + total_extra_bits) >> 3,
+                header_bytes,
+            },
+            // `ZSTD_estimateBlockSize_symbolType` prices a table it cannot
+            // build at `nbSeq * 10`.
+            None => PartCostEstimate {
+                symbol_cost_bytes: stats.total as u64 * 10,
                 header_bytes: ncount_header_bytes as u64,
-            }
-        }
+            },
+        },
     }
 }
 
-/// Estimate the per-symbol FSE code cost (in bits) for a compressed encoding,
-/// by building an actual FSE CTable and using `ctable_bit_cost` (matching C's
-/// `ZSTD_fseBitCost` in `ZSTD_estimateBlockSize_symbolType`).
-/// Does NOT include the NCount header (that is handled separately).
-fn estimate_fse_code_cost_bits(part: SequencePart, stats: &SequenceCodeStats) -> u64 {
+/// The NCount header and per-symbol cost of the table the encoder will build,
+/// which is not the table the selection priced: `ZSTD_buildCTable` drops one
+/// from the last code's count before normalizing, `ZSTD_NCountCost` does not.
+fn compressed_part_estimate(
+    part: SequencePart,
+    stats: &SequenceCodeStats,
+    last_code: u8,
+) -> Option<(u64, u64)> {
     let table_log = fse::optimal_table_log(
         part.max_accuracy_log() as u32,
         stats.total,
         stats.max_symbol.into(),
     );
+    let mut counts = stats.counts;
+    let mut total = stats.total;
+    if counts[usize::from(last_code)] > 1 {
+        counts[usize::from(last_code)] -= 1;
+        total -= 1;
+    }
     let mut normalized = [0i16; fse::SYMBOLVALUE_MAX + 1];
     let effective_table_log = match fse::normalize_count(
         &mut normalized,
         table_log,
-        &stats.counts,
-        stats.total,
+        &counts,
+        total,
         stats.max_symbol.into(),
-        stats.total >= 2048,
+        total >= 2048,
     ) {
         Ok(tl) if tl > 0 => tl,
-        _ => return u64::MAX,
+        _ => return None,
     };
+    let bound = fse::ncount_write_bound(stats.max_symbol.into(), table_log).ok()?;
+    let mut header = [0u8; fse::NCOUNT_WRITE_BOUND_MAX];
+    let header_bytes = fse::write_ncount(
+        &mut header[..bound],
+        &normalized,
+        stats.max_symbol.into(),
+        table_log,
+    )
+    .ok()?;
 
-    // Build actual FSE CTable from normalized distribution, then compute
-    // per-symbol cost using ctable_bit_cost (matching C's ZSTD_fseBitCost).
     let mut ctable = fse::CTable::default();
-    if fse::build_ctable(
+    fse::build_ctable(
         &mut ctable,
         &normalized,
         stats.max_symbol as u32,
         effective_table_log,
     )
-    .is_err()
-    {
-        return u64::MAX;
-    }
-
+    .ok()?;
     let bad_cost = (effective_table_log + 1) << COST_ACCURACY_LOG;
     let mut cost = 0u64;
     for symbol in 0..=stats.max_symbol as usize {
         if stats.counts[symbol] == 0 {
             continue;
         }
-        let bit_cost = match fse::ctable_bit_cost(&ctable, symbol as u8, COST_ACCURACY_LOG) {
-            Ok(c) => c,
-            Err(_) => return u64::MAX,
-        };
+        let bit_cost = fse::ctable_bit_cost(&ctable, symbol as u8, COST_ACCURACY_LOG).ok()?;
         if bit_cost >= bad_cost {
-            return u64::MAX;
+            return None;
         }
         cost += u64::from(stats.counts[symbol]) * u64::from(bit_cost);
     }
-    cost >> COST_ACCURACY_LOG
+    Some((cost >> COST_ACCURACY_LOG, header_bytes as u64))
 }
 
-fn estimate_literal_cost_bytes(
-    literals: &[u8],
-    prev_huf_table: Option<&huff0::CTableX1>,
-    literals_compression_disabled: bool,
-) -> u64 {
-    // Matching C's ZSTD_buildBlockEntropyStats_literals + ZSTD_estimateBlockSize_literal
-    // pipeline: build actual Huffman table, check repeat mode against previous table.
-    // C: literalSectionHeaderSize = 3 + (litSize >= 1 KB) + (litSize >= 16 KB)
-    let lit_len = literals.len();
-    // Coding disabled short-circuits both halves of that pipeline:
-    // `ZSTD_buildBlockEntropyStats_literals` returns `set_basic` before it
-    // counts anything, and `ZSTD_estimateBlockSize_literal` answers `set_basic`
-    // with a bare `litSize` -- no section header, which is the one place the
-    // estimate is not the size the block will actually take. Charging the
-    // header here would make the splitter value a split by three bytes a side
-    // that C does not, and the partitions are chosen by a `<` on these sums.
-    if literals_compression_disabled {
-        return lit_len as u64;
+fn estimate_literal_cost_bytes(literals: &[u8], inputs: LiteralCostInputs<'_>) -> u64 {
+    // Upstream answers `set_basic` before it counts anything.
+    if inputs.compression_disabled {
+        return literals.len() as u64;
     }
-    let lit_header_bytes: u64 = 3 + (lit_len >= 1024) as u64 + (lit_len >= 16384) as u64;
-    match huff0::estimate_literal_section_bytes_with_repeat(literals, prev_huf_table) {
-        Some(compressed_bytes) => lit_header_bytes + compressed_bytes as u64,
-        None => {
-            // Incompressible: raw literal cost
-            lit_header_bytes + lit_len as u64
-        }
-    }
+    huff0::estimate_literal_cost_bytes(
+        literals,
+        inputs.previous_table,
+        inputs.repeat_valid,
+        inputs.table_depth,
+    ) as u64
 }
 
 /// Reconcile repcodes for a sub-block when the previous sub-block was emitted
