@@ -1514,7 +1514,7 @@ pub(crate) fn compress_prefer_existing_table_into_mode(
     huff_log = match table_depth {
         TableDepth::Estimated => optimal_table_log(huff_log, src.len(), max_symbol_value),
         TableDepth::Searched => {
-            optimal_table_log_search(huff_log, &workspace.count, max_symbol_value, src.len())
+            optimal_table_log_search(huff_log, &workspace.count, max_symbol_value)
         }
     };
     huff_log = build_ctable(
@@ -2239,7 +2239,6 @@ fn optimal_table_log_search(
     max_table_log: u32,
     count: &[u32; SYMBOLVALUE_MAX + 1],
     max_symbol_value: u32,
-    src_size: usize,
 ) -> u32 {
     // Compute cardinality (number of non-zero symbols)
     let cardinality = count[..=max_symbol_value as usize]
@@ -2250,10 +2249,7 @@ fn optimal_table_log_search(
         1
     } else {
         highbit32(cardinality) + 1
-    }
-    .max(5);
-
-    let max_table_log = optimal_table_log(max_table_log, src_size, max_symbol_value);
+    };
 
     let mut opt_size = usize::MAX - 1;
     let mut opt_log = max_table_log;
