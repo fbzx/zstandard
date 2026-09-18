@@ -456,8 +456,8 @@ impl ParserStrategy {
     ///
     /// C's `HUF_OPTIMAL_DEPTH_THRESHOLD` is `ZSTD_btultra`, and both
     /// `ZSTD_compressLiterals` and `ZSTD_buildBlockEntropyStats` compare
-    /// `cParams.strategy` against it. `BinaryTreeUltra` covers `ZSTD_btultra`
-    /// and `ZSTD_btultra2`, which are ranks 8 and 9.
+    /// `cParams.strategy` against it, so the comparison below takes in both
+    /// `BinaryTreeUltra` (rank 8) and `BinaryTreeUltra2` (rank 9).
     pub(crate) fn searches_huffman_table_depth(self) -> bool {
         self.zstd_rank() >= ParserStrategy::BinaryTreeUltra.zstd_rank()
     }
