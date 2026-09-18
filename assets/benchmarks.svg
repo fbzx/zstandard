@@ -87,13 +87,13 @@
   <text x="874.0" y="314" class="xtick">22</text>
   <text x="704" y="336" class="axlabel">compression level</text>
   <line x1="534" y1="165.4" x2="874" y2="165.4" class="parity"/>
-  <text x="540.0" y="187.7" class="note">parity with zstd</text>
-  <path d="M534.0,132.9 L550.2,124.0 L566.4,167.3 L582.6,174.7 L598.8,175.6 L615.0,171.6 L631.1,175.6 L647.3,181.3 L663.5,181.1 L679.7,158.9 L695.9,156.4 L712.1,150.3 L728.3,160.2 L744.5,153.4 L760.7,148.5 L776.9,144.6 L793.0,156.8 L809.2,134.1 L825.4,140.6 L841.6,116.4 L857.8,130.9 L874.0,124.8" class="lineA"/>
-  <path d="M534.0,167.6 L550.2,165.0 L566.4,158.3 L582.6,165.6 L598.8,157.4 L615.0,157.0 L631.1,165.1 L647.3,162.1 L663.5,162.9 L679.7,170.1 L695.9,167.1 L712.1,165.4 L728.3,165.2 L744.5,168.9 L760.7,166.8 L776.9,182.6 L793.0,173.8 L809.2,186.7 L825.4,184.6 L841.6,185.2 L857.8,185.1 L874.0,182.1" class="lineB"/>
+  <text x="540.0" y="189.2" class="note">parity with zstd</text>
+  <path d="M534.0,130.7 L550.2,118.8 L566.4,156.4 L582.6,174.2 L598.8,177.5 L615.0,160.4 L631.1,173.8 L647.3,173.2 L663.5,174.6 L679.7,155.4 L695.9,151.5 L712.1,154.1 L728.3,171.4 L744.5,154.2 L760.7,150.6 L776.9,162.2 L793.0,149.7 L809.2,151.2 L825.4,152.9 L841.6,155.1 L857.8,121.2 L874.0,133.6" class="lineA"/>
+  <path d="M534.0,167.4 L550.2,155.8 L566.4,156.6 L582.6,160.8 L598.8,158.4 L615.0,156.8 L631.1,160.2 L647.3,162.7 L663.5,162.4 L679.7,169.7 L695.9,159.8 L712.1,168.3 L728.3,159.8 L744.5,166.0 L760.7,163.6 L776.9,182.9 L793.0,177.8 L809.2,174.0 L825.4,185.4 L841.6,185.2 L857.8,180.2 L874.0,179.3" class="lineB"/>
   <line x1="540" y1="108" x2="564" y2="108" class="lineA"/>
   <text x="570" y="112" class="legend">encode</text>
   <line x1="626" y1="108" x2="650" y2="108" class="lineB"/>
   <text x="656" y="112" class="legend">decode</text>
 
-  <text x="450" y="378" class="caption">11 corpora &#215; levels 1-22, one-shot, median across corpora &#183; zstandard v0.1.6-1-gfcefd1c vs zstd v1.5.7 &#183; single machine, relative numbers only</text>
+  <text x="450" y="378" class="caption">11 corpora &#215; levels 1-22, one-shot, median across corpora &#183; zstandard v0.1.8-4-g4f61ec4 vs zstd v1.5.7 &#183; single machine, relative numbers only</text>
 </svg>
