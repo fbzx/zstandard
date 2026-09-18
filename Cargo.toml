@@ -104,6 +104,7 @@ default = []
 internal-trace = []
 internal-fuzz = []
 asm-inspect = []
+long-running-test = []
 
 [package.metadata.docs.rs]
 all-features = true

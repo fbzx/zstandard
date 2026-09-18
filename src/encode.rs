@@ -979,17 +979,12 @@ fn compression_parameters_with_overrides(
     // values (`ZSTD_ldm_adjustParameters`, called at `:2126` with the applied
     // cParams). Reading the level's window instead would enable it on sources
     // far too small to reach past a block.
-    //
-    // [`LdmMode::Auto`] is deliberately *not* run through
-    // [`resolve_enable_ldm`] here yet. The dictionary that used to block it no
-    // longer does; what is left is that honouring the rule changes *default*
-    // output, and only in one place -- level 22 above 64 MiB, the single level
-    // whose window reaches the 27 the rule requires. Nothing in the suite
-    // encodes a body that large, so turning it on would be a behaviour change
-    // with no test able to see it either way. It wants the auto-boundary case
-    // in Phase 3, which needs a corpus over 64 MiB behind the long-running
-    // feature. The rule itself is implemented and tested against C.
-    params.ldm = matches!(overrides.long_distance_matching, LdmMode::Enabled).then(|| {
+    let enable_ldm = crate::window::resolve_enable_ldm(
+        overrides.long_distance_matching,
+        upstream_cparams.strategy,
+        upstream_cparams.window_log,
+    );
+    params.ldm = enable_ldm.then(|| {
         LdmParameters::resolve(
             overrides.ldm_overrides(),
             upstream_cparams.strategy,
@@ -3822,6 +3817,41 @@ mod tests {
         assert_eq!(priced(LiteralCompressionMode::Auto), (true, true));
         assert_eq!(priced(LiteralCompressionMode::Enabled), (true, false));
         assert_eq!(priced(LiteralCompressionMode::Disabled), (false, true));
+    }
+
+    #[test]
+    fn long_distance_matching_auto_mode_boundary() {
+        const BOUNDARY_OFF: usize = 1 << 26;
+        const BOUNDARY_ON: usize = (1 << 26) + 1;
+
+        let check = |level: i32,
+                     window_override: Option<u32>,
+                     size: usize,
+                     expect_ldm: bool,
+                     expect_window: u32| {
+            let options = EncoderOptions {
+                compression_level: CompressionLevel::try_new(level).unwrap(),
+                pledged_src_size: Some(size as u64),
+                parameters: ParameterOverrides {
+                    window_log: window_override,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let params = compression_parameters_for_options(options, Some(size), None);
+            assert_eq!(
+                params.ldm.is_some(),
+                expect_ldm,
+                "level {level} window {window_override:?} size {size}"
+            );
+            assert_eq!(params.match_finder.window_log, expect_window);
+        };
+
+        check(22, None, BOUNDARY_OFF, false, 26);
+        check(22, None, BOUNDARY_ON, true, 27);
+        check(16, Some(26), BOUNDARY_ON, false, 26);
+        check(16, Some(27), BOUNDARY_ON, true, 27);
+        check(15, Some(27), BOUNDARY_ON, false, 27);
     }
 
     #[test]

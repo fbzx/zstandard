@@ -27,15 +27,12 @@
 //! it in the way `ZSTD_loadDictionaryContent` does -- a different walk from the
 //! one generation makes, which is why it is a different function.
 //!
-//! [`resolve_enable_ldm`] is implemented and tested but still not consulted by
-//! the encoder. That is no longer about a dictionary: honouring the rule would
-//! change default output at level 22 above 64 MiB and nowhere else, and nothing
-//! in the suite encodes a body that large. See the note in
-//! `compression_parameters_with_overrides` and Phase 3 in
+//! [`resolve_enable_ldm`] decides [`LdmMode::Auto`] from the strategy and the
+//! adjusted window. See `compression_parameters_with_overrides` and Phase 3 in
 //! `docs/PARITY_PLAN.md`.
 
-// `resolve_enable_ldm` has only tests for callers, and a handful of constants
-// are named for the reader rather than used twice.
+// A handful of constants and accessors are named for the reader rather
+// than used twice.
 #![allow(dead_code)]
 
 use crate::encode::UpstreamStrategy;

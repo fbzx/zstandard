@@ -6955,3 +6955,143 @@ fn every_double_fast_row_a_dictionary_reaches_stays_at_or_under_upstream() {
         .collect();
     assert_eq!(found, SHAPES, "the parse shapes this grid reaches moved");
 }
+
+#[test]
+fn long_distance_matching_auto_boundary_matches_upstream() {
+    let Some(helper) = upstream_trace_helper::helper_path() else {
+        return;
+    };
+    const BOUNDARY_OFF: usize = 1 << 26;
+    const BOUNDARY_ON: usize = (1 << 26) + 1;
+
+    let dummy_off = vec![0u8; BOUNDARY_OFF];
+    let dummy_on = vec![0u8; BOUNDARY_ON];
+
+    let applied_22_off = upstream_trace_helper::trace_advanced_applied_ldm_params(
+        helper,
+        upstream_trace_helper::DICT_NONE,
+        &["compressionLevel=22".to_string()],
+        &dummy_off,
+    );
+    assert_eq!(
+        applied_22_off.enabled, 2,
+        "level 22 at 2^26 must disable LDM"
+    );
+    assert_eq!(applied_22_off.window_log, 0);
+
+    let applied_22_on = upstream_trace_helper::trace_advanced_applied_ldm_params(
+        helper,
+        upstream_trace_helper::DICT_NONE,
+        &["compressionLevel=22".to_string()],
+        &dummy_on,
+    );
+    assert_eq!(
+        applied_22_on.enabled, 1,
+        "level 22 above 2^26 must auto-enable LDM"
+    );
+    assert_eq!(applied_22_on.window_log, 27);
+
+    let applied_16_w26 = upstream_trace_helper::trace_advanced_applied_ldm_params(
+        helper,
+        upstream_trace_helper::DICT_NONE,
+        &[
+            "compressionLevel=16".to_string(),
+            "windowLog=26".to_string(),
+        ],
+        &dummy_on,
+    );
+    assert_eq!(
+        applied_16_w26.enabled, 2,
+        "level 16 at windowLog 26 must disable LDM"
+    );
+
+    let applied_16_w27 = upstream_trace_helper::trace_advanced_applied_ldm_params(
+        helper,
+        upstream_trace_helper::DICT_NONE,
+        &[
+            "compressionLevel=16".to_string(),
+            "windowLog=27".to_string(),
+        ],
+        &dummy_on,
+    );
+    assert_eq!(
+        applied_16_w27.enabled, 1,
+        "level 16 at windowLog 27 must auto-enable LDM"
+    );
+
+    let applied_15_w27 = upstream_trace_helper::trace_advanced_applied_ldm_params(
+        helper,
+        upstream_trace_helper::DICT_NONE,
+        &[
+            "compressionLevel=15".to_string(),
+            "windowLog=27".to_string(),
+        ],
+        &dummy_on,
+    );
+    assert_eq!(
+        applied_15_w27.enabled, 2,
+        "level 15 (< btopt) must never auto-enable LDM"
+    );
+}
+
+#[test]
+#[cfg(feature = "long-running-test")]
+#[ignore = "long-running test (>64 MiB)"]
+fn long_distance_matching_auto_boundary_encode_matches_upstream() {
+    let Some(helper) = upstream_trace_helper::helper_path() else {
+        return;
+    };
+    const SIZE: usize = (1 << 26) + 1;
+    let input = benchmark_corpora::build_json_records_pattern(SIZE);
+
+    // 1. Level 16 with windowLog=27: auto rule enables LDM.
+    let options_16 = EncoderOptions {
+        compression_level: CompressionLevel::try_new(16).unwrap(),
+        parameters: ParameterOverrides {
+            window_log: Some(27),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let settings_16 = vec![
+        "compressionLevel=16".to_string(),
+        "windowLog=27".to_string(),
+    ];
+    let theirs_16 = upstream_trace_helper::compress_advanced(
+        helper,
+        upstream_trace_helper::DICT_NONE,
+        &settings_16,
+        &input,
+    );
+    let ours_16 = encode_all_with_options(&input, options_16).unwrap();
+    assert_eq!(
+        ours_16.len(),
+        theirs_16.len(),
+        "level 16 w27 compressed size mismatch: ours {} vs theirs {}",
+        ours_16.len(),
+        theirs_16.len()
+    );
+    assert_eq!(ours_16, theirs_16, "level 16 w27 bytes mismatch");
+
+    // 2. Level 22 default: auto rule enables LDM above 2^26.
+    let options_22 = EncoderOptions {
+        compression_level: CompressionLevel::try_new(22).unwrap(),
+        ..Default::default()
+    };
+    let settings_22 = vec!["compressionLevel=22".to_string()];
+    let theirs_22 = upstream_trace_helper::compress_advanced(
+        helper,
+        upstream_trace_helper::DICT_NONE,
+        &settings_22,
+        &input,
+    );
+    let ours_22 = encode_all_with_options(&input, options_22).unwrap();
+    assert_eq!(
+        ours_22.len(),
+        theirs_22.len(),
+        "level 22 compressed size mismatch: ours {} vs theirs {}",
+        ours_22.len(),
+        theirs_22.len()
+    );
+    assert_eq!(ours_22, theirs_22, "level 22 bytes mismatch");
+}

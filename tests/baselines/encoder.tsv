@@ -798,7 +798,7 @@ mixed-entropy	21	one-shot	82183	bd196a5cc92cb1ff
 mixed-entropy	21	streaming	82183	48dc521f73ad2035
 mixed-entropy	22	narrow-window	82219	37ce3832b9a4e689
 mixed-entropy	22	one-shot	82183	bd196a5cc92cb1ff
-mixed-entropy	22	streaming	82183	a0dac4b4039f0dbd
+mixed-entropy	22	streaming	82171	8955873bac3e8556
 pseudorandom	-7	narrow-window	262165	b1ce0db3d4936e91
 pseudorandom	-7	one-shot	262159	39763dc8e8017925
 pseudorandom	-7	streaming	262159	e2ad8b514d1c1ca5
