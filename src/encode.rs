@@ -10673,14 +10673,20 @@ fn encode_all_into_scratch(
                 ldm.as_mut(),
             )?;
             while block_start < src.len() {
-                // C determines block size via ZSTD_findBlockSize: min(blockSizeMax,
-                // remaining). For optimal strategies (btopt/btultra/btultra2), the
-                // pre-compression block-split fingerprinting heuristic is expensive
-                // (sampling_rate=1 scans every byte) and rarely beneficial — it adds
-                // 30-40% overhead on highly-compressible data while finding no split
-                // points. Use C's simple formula for these strategies. Lower strategies
-                // keep the heuristic since their cheaper sampling_rate still pays off
-                // for heterogeneous data.
+                // Upstream's own table gives optimal strategies a row here too --
+                // `splitLevels[] = { 0, 0, 1, 2, 2, 3, 3, 4, 4, 4 }`
+                // (`zstd_compress.c:4555`) puts btopt/btultra/btultra2 at level 4,
+                // not 0. This is not that row; it is a deliberate divergence, kept
+                // because running it costs more than it buys. Level 4 is
+                // `SAMPLING_RATE = 1, HASH_LOG = 10` (`zstd_preSplit.c`), so it
+                // hashes every byte of every 128 KiB block. On the compressible
+                // end of the benchmark corpora it finds no split and pays for the
+                // scan regardless: `small-alphabet` at level 16 drops from 1,723
+                // MiB/s to 407 running it, `repeated-chunk` from 1,719 to 510 --
+                // both landing near upstream's own throughput there rather than
+                // ahead of it. It also costs ratio on `mixed-entropy`: level 16
+                // grows 1,852 bytes and level 17 grows 876, against 77 to 78
+                // bytes closed at 18 through 22.
                 let block_size = if params.upstream_cparams.strategy.is_optimal() {
                     block_size_max.min(src.len() - block_start)
                 } else {
