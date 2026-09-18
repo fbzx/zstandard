@@ -400,6 +400,7 @@ pub(crate) enum ParserStrategy {
     BinaryTreeLazy2,
     BinaryTreeOpt,
     BinaryTreeUltra,
+    BinaryTreeUltra2,
 }
 
 impl ParserStrategy {
@@ -416,6 +417,7 @@ impl ParserStrategy {
             Self::BinaryTreeLazy2 => 6,
             Self::BinaryTreeOpt => 7,
             Self::BinaryTreeUltra => 8,
+            Self::BinaryTreeUltra2 => 9,
         }
     }
 
@@ -430,7 +432,10 @@ impl ParserStrategy {
     pub(crate) fn is_binary_tree(self) -> bool {
         matches!(
             self,
-            Self::BinaryTreeLazy2 | Self::BinaryTreeOpt | Self::BinaryTreeUltra
+            Self::BinaryTreeLazy2
+                | Self::BinaryTreeOpt
+                | Self::BinaryTreeUltra
+                | Self::BinaryTreeUltra2
         )
     }
 

@@ -1196,9 +1196,8 @@ fn parser_strategy_from_upstream(
         }
         UpstreamStrategy::BinaryTreeLazy2 => ParserStrategy::BinaryTreeLazy2,
         UpstreamStrategy::BinaryTreeOpt => ParserStrategy::BinaryTreeOpt,
-        UpstreamStrategy::BinaryTreeUltra | UpstreamStrategy::BinaryTreeUltra2 => {
-            ParserStrategy::BinaryTreeUltra
-        }
+        UpstreamStrategy::BinaryTreeUltra => ParserStrategy::BinaryTreeUltra,
+        UpstreamStrategy::BinaryTreeUltra2 => ParserStrategy::BinaryTreeUltra2,
     }
 }
 
@@ -3626,10 +3625,10 @@ mod tests {
             (16, ParserStrategy::BinaryTreeOpt),
             (17, ParserStrategy::BinaryTreeOpt),
             (18, ParserStrategy::BinaryTreeUltra),
-            (19, ParserStrategy::BinaryTreeUltra),
-            (20, ParserStrategy::BinaryTreeUltra),
-            (21, ParserStrategy::BinaryTreeUltra),
-            (22, ParserStrategy::BinaryTreeUltra),
+            (19, ParserStrategy::BinaryTreeUltra2),
+            (20, ParserStrategy::BinaryTreeUltra2),
+            (21, ParserStrategy::BinaryTreeUltra2),
+            (22, ParserStrategy::BinaryTreeUltra2),
         ] {
             let level = CompressionLevel::try_new(level).unwrap();
             assert_eq!(
@@ -4171,6 +4170,16 @@ mod tests {
             128,
             125,
             ParserStrategy::BinaryTreeUltra
+        ));
+        assert!(compressed_literals_clear_minimum_gain(
+            256,
+            252,
+            ParserStrategy::BinaryTreeUltra2
+        ));
+        assert!(!compressed_literals_clear_minimum_gain(
+            256,
+            253,
+            ParserStrategy::BinaryTreeUltra2
         ));
     }
 
@@ -6940,6 +6949,92 @@ mod tests {
         print_raw_dictionary_level_full_sequence_comparison(18);
     }
 
+    /// Generated, not stored: uniform bytes with byte 0 forced on 1/30 of
+    /// positions, just enough bias that the Huffman-compressed size clears
+    /// btultra2's 1/256 minimum gain but not btultra's stricter 1/128 --
+    /// the exact window `min-gain-btultra2` exists for. Found by sweeping
+    /// this same generator's bias in a scratch probe until it landed there.
+    fn near_incompressible_literals_body(size: usize, denom: u64, seed: u64) -> Vec<u8> {
+        let mut state = seed;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        (0..size)
+            .map(|_| {
+                let r = next();
+                if r % denom == 0 { 0u8 } else { (r >> 32) as u8 }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn btultra_declines_what_btultra2_accepts_at_the_same_content() {
+        let src = near_incompressible_literals_body(65536, 30, 0xF00D_BEEF_1234_5678);
+
+        let mut huffman_dst = Vec::new();
+        let mut huf_workspace = huff0::CompressWorkspace::default();
+        let ultra = encode_zero_sequence_compressed_block_owned(
+            &src,
+            &LiteralsEncodingState::default(),
+            ParserStrategy::BinaryTreeUltra,
+            &mut huffman_dst,
+            &mut huf_workspace,
+        )
+        .unwrap();
+        let ultra2 = encode_zero_sequence_compressed_block_owned(
+            &src,
+            &LiteralsEncodingState::default(),
+            ParserStrategy::BinaryTreeUltra2,
+            &mut huffman_dst,
+            &mut huf_workspace,
+        )
+        .unwrap();
+
+        assert!(
+            ultra.is_none(),
+            "btultra's 1/128 gain should reject this content -- if it \
+             didn't, the probe's bias needs retuning"
+        );
+        assert!(
+            ultra2.is_some(),
+            "btultra2's 1/256 gain should accept this content"
+        );
+    }
+
+    #[test]
+    fn near_incompressible_literals_at_btultra2_match_upstream() {
+        let Some(helper) = upstream_trace_helper::helper_path() else {
+            return;
+        };
+
+        let src = near_incompressible_literals_body(65536, 30, 0xF00D_BEEF_1234_5678);
+
+        let compressed = encode_all_with_options(
+            &src,
+            EncoderOptions {
+                checksum: false,
+                compression_level: CompressionLevel::try_new(19).unwrap(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let theirs = upstream_trace_helper::compress_once(
+            helper,
+            "compress-regular-configured",
+            19,
+            false,
+            &src,
+        );
+        assert_eq!(
+            compressed, theirs,
+            "level 19 (btultra2) must match upstream on a body whose \
+             literals only clear btultra2's minimum gain, not btultra's"
+        );
+    }
+
     #[test]
     fn print_raw_dictionary_l16_full_sequence_comparison() {
         print_raw_dictionary_level_full_sequence_comparison(16);
@@ -9424,6 +9519,7 @@ pub enum BlockTraceParserStrategy {
     BinaryTreeLazy2,
     BinaryTreeOpt,
     BinaryTreeUltra,
+    BinaryTreeUltra2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9682,6 +9778,7 @@ impl From<ParserStrategy> for BlockTraceParserStrategy {
             ParserStrategy::BinaryTreeLazy2 => Self::BinaryTreeLazy2,
             ParserStrategy::BinaryTreeOpt => Self::BinaryTreeOpt,
             ParserStrategy::BinaryTreeUltra => Self::BinaryTreeUltra,
+            ParserStrategy::BinaryTreeUltra2 => Self::BinaryTreeUltra2,
         }
     }
 }

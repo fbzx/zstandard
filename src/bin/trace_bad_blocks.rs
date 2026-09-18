@@ -624,6 +624,7 @@ fn format_parser_strategy(strategy: zstandard::BlockTraceParserStrategy) -> &'st
         zstandard::BlockTraceParserStrategy::BinaryTreeLazy2 => "bt-lazy2",
         zstandard::BlockTraceParserStrategy::BinaryTreeOpt => "bt-opt",
         zstandard::BlockTraceParserStrategy::BinaryTreeUltra => "bt-ultra",
+        zstandard::BlockTraceParserStrategy::BinaryTreeUltra2 => "bt-ultra2",
     }
 }
 
