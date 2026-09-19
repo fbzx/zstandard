@@ -10673,20 +10673,20 @@ fn encode_all_into_scratch(
                 ldm.as_mut(),
             )?;
             while block_start < src.len() {
-                // Upstream's own table gives optimal strategies a row here too --
+                // Upstream's own table gives the optimal strategies a row here:
                 // `splitLevels[] = { 0, 0, 1, 2, 2, 3, 3, 4, 4, 4 }`
                 // (`zstd_compress.c:4555`) puts btopt/btultra/btultra2 at level 4,
-                // not 0. This is not that row; it is a deliberate divergence, kept
-                // because running it costs more than it buys. Level 4 is
+                // not 0. Skipping it is a deliberate divergence, kept because
+                // running the row costs more than it buys. Level 4 is
                 // `SAMPLING_RATE = 1, HASH_LOG = 10` (`zstd_preSplit.c`), so it
                 // hashes every byte of every 128 KiB block. On the compressible
                 // end of the benchmark corpora it finds no split and pays for the
-                // scan regardless: `small-alphabet` at level 16 drops from 1,723
-                // MiB/s to 407 running it, `repeated-chunk` from 1,719 to 510 --
-                // both landing near upstream's own throughput there rather than
-                // ahead of it. It also costs ratio on `mixed-entropy`: level 16
-                // grows 1,852 bytes and level 17 grows 876, against 77 to 78
-                // bytes closed at 18 through 22.
+                // scan anyway, giving back a several-fold encode-speed lead at
+                // levels 16 through 22 to land at roughly upstream's own
+                // throughput. It costs ratio as well: on `mixed-entropy` the row
+                // grows level 16 by 1,852 bytes and level 17 by 876, against 77
+                // to 78 bytes closed at levels 18 through 22. Measured at 4 MiB;
+                // PR #11 has the full numbers.
                 let block_size = if params.upstream_cparams.strategy.is_optimal() {
                     block_size_max.min(src.len() - block_start)
                 } else {
@@ -10746,6 +10746,8 @@ fn encode_all_into_scratch(
                 state
             });
             while block_start < src.len() {
+                // Same deliberate bypass of upstream's `splitLevels` row as the
+                // non-dictionary loop above; see that comment for the cost.
                 let block_size = if params.upstream_cparams.strategy.is_optimal() {
                     block_size_max.min(src.len() - block_start)
                 } else {
